@@ -23,6 +23,59 @@ console = Console()
 
 
 @app.command()
+def evolve(
+    path: str = typer.Argument(".", help="The path to evaluate and evolve"),
+    steps: int = typer.Option(1, help="Number of evolution steps to perform"),
+    max_retries: int = typer.Option(3, help="Maximum retries per variant if tests fail")
+) -> None:
+    """
+    [Hidden] Run the QC evolution loop: Edit -> Test -> Improve.
+    Generates variants based on suggestions, tests them, and picks the best.
+    """
+    console.print(
+        f"[bold magenta]Starting evolution loop for path:[/bold magenta] {path} "
+        f"[dim](steps={steps}, max_retries={max_retries})[/dim]"
+    )
+    
+    # 1. First, run a baseline evaluation to get suggestions
+    evaluator = Evaluator(path)
+    console.print("[cyan]Running baseline evaluation...[/cyan]")
+    hard_results = evaluator.hard_evaluator.evaluate()
+    soft_results = evaluator.soft_evaluator.evaluate()
+    baseline_report = evaluator.soft_evaluator.generate_final_report(
+        hard_results, soft_results
+    )
+    
+    suggestions = baseline_report.get("suggestions", [])
+    if not suggestions:
+        console.print("[yellow]No suggestions found to evolve. Exiting.[/yellow]")
+        return
+        
+    console.print(
+        f"[green]Found {len(suggestions)} suggestions. "
+        f"Starting evolution branches...[/green]"
+    )
+    
+    # TODO: Implement the Git branching and Agent modification logic here.
+    # The loop will be:
+    # for step in range(steps):
+    #   for suggestion in suggestions:
+    #     checkout new branch variant-X
+    #     for retry in range(max_retries):
+    #       ask LLM to apply suggestion to code
+    #       run pytest
+    #       if pytest passes:
+    #         run harness . to get new score
+    #         break
+    #       else:
+    #         feed error back to LLM for retry
+    #   compare all variants and checkout the best one
+    
+    console.print(
+        "[yellow]Evolution engine skeleton ready. "
+        "Actual git mutation logic pending.[/yellow]"
+    )
+@app.command()
 def run(path: str = typer.Argument(".", help="The path to evaluate")) -> None:
     """
     Run the full harness evaluation on the specified path.
