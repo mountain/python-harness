@@ -123,14 +123,18 @@ class HardEvaluator:
                                     "complexity": block.get('complexity')
                                 })
             
-            if issues:
+            if result.returncode != 0:
+                # E.g. syntax error in target code preventing radon from parsing
+                status = "failed"
+            elif issues:
                 status = "failed"
                 
             return {
                 "status": status,
                 "issues": issues,
                 "return_code": result.returncode,
-                "output": result.stdout
+                "output": result.stdout,
+                "error_message": result.stderr if result.returncode != 0 else ""
             }
         except Exception as e:
             return {"status": "error", "error_message": str(e)}

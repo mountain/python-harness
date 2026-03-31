@@ -130,6 +130,16 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
                     f"  - {issue['file']}: {issue['type']} '{issue['name']}' "
                     f"has CC {issue['complexity']}"
                 )
+            
+            # If radon failed for another reason 
+            # (e.g. radon not installed or syntax error)
+            if not issues and hard_results["radon_cc"].get("error_message"):
+                err_msg = hard_results['radon_cc'].get('error_message')
+                console.print(f"[red]Radon CC Error:[/red] {err_msg}")
+            elif not issues:
+                console.print(
+                    "[red]Radon CC failed but no specific issues were parsed.[/red]"
+                )
         sys.exit(1)
         
     console.print("[bold green]Hard Evaluation Passed![/bold green]")
