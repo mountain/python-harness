@@ -16,10 +16,10 @@ An agentic codebase evaluation and evolution tool for Python projects.
 
 ## Installation
 
-You can install `python-harness` locally using `uv` or `pip`:
+You can install `python-harness` using `uv` or `pip`:
 
 ```bash
-uv pip install -e ".[dev]"
+uv pip install python-harness
 ```
 
 ## Configuration
