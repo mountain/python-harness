@@ -1,0 +1,520 @@
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from python_harness import refine_engine
+from python_harness.refine_apply import NullSuggestionApplier
+from python_harness.refine_engine import execute_candidate, run_refine, run_refine_round
+from python_harness.refine_models import Candidate
+
+
+class FlakyApplier:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def apply(
+        self,
+        workspace: Path,
+        suggestion: dict[str, str],
+        failure_feedback: str = "",
+    ) -> dict[str, object]:
+        self.calls.append(failure_feedback)
+        return {
+            "ok": True,
+            "touched_files": [workspace.name, suggestion["title"]],
+            "failure_reason": "",
+        }
+
+
+def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    applier = FlakyApplier()
+    feedback_seen: list[str] = []
+
+    def self_check(_: Path) -> tuple[bool, str]:
+        if not feedback_seen:
+            feedback_seen.append("first")
+            return False, "pytest failed"
+        return True, ""
+
+    def evaluator(_: Path) -> dict[str, object]:
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 88.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="c1",
+        suggestion={"title": "Improve readability", "description": "Split helper"},
+        workspace_root=tmp_path / "runs",
+        applier=applier,
+        self_check_runner=self_check,
+        evaluator_runner=evaluator,
+        max_retries=2,
+    )
+
+    assert candidate.status == "measured"
+    assert applier.calls == ["", "pytest failed"]
+    assert candidate.retry_count == 1
+
+
+def test_execute_candidate_with_default_self_check_does_not_measure_failed_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    measured: list[str] = []
+    commands: list[tuple[list[str], Path]] = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> SimpleNamespace:
+        del capture_output, text, check
+        commands.append((args, cwd))
+        return SimpleNamespace(returncode=1, stdout="", stderr="ruff failed")
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        measured.append(workspace.name)
+        return {"final_report": {"verdict": "Fail", "suggestions": []}}
+
+    monkeypatch.setattr("python_harness.refine_engine.subprocess.run", fake_run)
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="blocked",
+        suggestion={"title": "Fix tests", "description": "d"},
+        workspace_root=tmp_path / "runs",
+        applier=NullSuggestionApplier(),
+        self_check_runner=refine_engine._default_self_check_runner,
+        evaluator_runner=evaluator,
+        max_retries=0,
+    )
+
+    expected_workspace = tmp_path / "runs" / "blocked"
+    assert candidate.status == "failed"
+    assert measured == []
+    assert commands == [
+        (
+            [sys.executable, "-m", "ruff", "check", str(expected_workspace)],
+            expected_workspace,
+        )
+    ]
+
+
+def test_default_self_check_runner_uses_target_path_in_all_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "sample.py").write_text("print('ok')\n")
+    calls: list[tuple[list[str], Path]] = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+    ) -> SimpleNamespace:
+        del capture_output, text, check
+        calls.append((args, cwd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("python_harness.refine_engine.subprocess.run", fake_run)
+
+    ok, output = refine_engine._default_self_check_runner(workspace)
+
+    assert ok is True
+    assert output == ""
+    assert calls == [
+        ([sys.executable, "-m", "ruff", "check", str(workspace)], workspace),
+        ([sys.executable, "-m", "mypy", str(workspace)], workspace),
+        ([sys.executable, "-m", "pytest", str(workspace)], workspace),
+    ]
+
+
+def test_execute_candidate_retries_when_applier_returns_not_ok(tmp_path: Path) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    feedback_seen: list[str] = []
+    measure_calls: list[str] = []
+
+    class RetryApplier:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del workspace, suggestion
+            feedback_seen.append(failure_feedback)
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ok": False,
+                    "touched_files": [],
+                    "failure_reason": "model refused patch",
+                }
+            return {"ok": True, "touched_files": [], "failure_reason": ""}
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        measure_calls.append(workspace.name)
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 88.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="retry-ok-false",
+        suggestion={"title": "Retry patch", "description": "d"},
+        workspace_root=tmp_path / "runs",
+        applier=RetryApplier(),
+        self_check_runner=lambda _: (True, ""),
+        evaluator_runner=evaluator,
+        max_retries=1,
+    )
+
+    assert candidate.status == "measured"
+    assert candidate.retry_count == 1
+    assert feedback_seen == ["", "model refused patch"]
+    assert measure_calls == ["retry-ok-false"]
+
+
+def test_execute_candidate_retries_when_applier_raises(tmp_path: Path) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    feedback_seen: list[str] = []
+    evaluated: list[str] = []
+
+    class ExplodingApplier:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del workspace, suggestion
+            feedback_seen.append(failure_feedback)
+            self.calls += 1
+            raise RuntimeError(f"boom {self.calls}")
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        evaluated.append(workspace.name)
+        return {"final_report": {"verdict": "Pass", "suggestions": []}}
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="retry-exception",
+        suggestion={"title": "Retry exception", "description": "d"},
+        workspace_root=tmp_path / "runs",
+        applier=ExplodingApplier(),
+        self_check_runner=lambda _: (True, ""),
+        evaluator_runner=evaluator,
+        max_retries=1,
+    )
+
+    assert candidate.status == "failed"
+    assert candidate.retry_count == 1
+    assert candidate.selection_reason == "boom 2"
+    assert feedback_seen == ["", "boom 1"]
+    assert evaluated == []
+
+
+def test_run_refine_round_creates_three_first_layer_and_nine_second_layer(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "baseline"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        name = workspace.name
+        if name == "baseline":
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 80.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": "S1", "description": "d1"},
+                        {"title": "S2", "description": "d2"},
+                        {"title": "S3", "description": "d3"},
+                    ],
+                },
+            }
+        if name.startswith("l1-"):
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 82.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": f"{name}-A", "description": "x"},
+                        {"title": f"{name}-B", "description": "x"},
+                        {"title": f"{name}-C", "description": "x"},
+                    ],
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 90.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    result = run_refine_round(
+        target_path=target,
+        workspace_root=tmp_path / "runs",
+        evaluator_runner=evaluator,
+        applier=NullSuggestionApplier(),
+        self_check_runner=lambda _: (True, ""),
+        max_retries=0,
+    )
+
+    assert result.baseline.id == "baseline"
+    first_layer = [
+        candidate for candidate in result.candidates if candidate.depth == 1
+    ]
+    second_layer = [
+        candidate for candidate in result.candidates if candidate.depth == 2
+    ]
+    assert len(first_layer) == 3
+    assert len(second_layer) == 9
+
+
+def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> None:
+    target = tmp_path / "baseline"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        name = workspace.name
+        if name == "baseline":
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 80.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": "S1", "description": "d1"},
+                        {"title": "S2", "description": "d2"},
+                        {"title": "S3", "description": "d3"},
+                        {"title": "S4", "description": "d4"},
+                    ],
+                },
+            }
+        if name.startswith("l1-"):
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 82.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": f"{name}-A", "description": "x"},
+                        {"title": f"{name}-B", "description": "x"},
+                        {"title": f"{name}-C", "description": "x"},
+                        {"title": f"{name}-D", "description": "x"},
+                    ],
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 90.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    result = run_refine_round(
+        target_path=target,
+        workspace_root=tmp_path / "runs",
+        evaluator_runner=evaluator,
+        applier=NullSuggestionApplier(),
+        self_check_runner=lambda _: (True, ""),
+        max_retries=0,
+    )
+
+    first_layer_ids = [
+        candidate.id for candidate in result.candidates if candidate.depth == 1
+    ]
+    second_layer = [
+        candidate for candidate in result.candidates if candidate.depth == 2
+    ]
+
+    assert first_layer_ids == ["l1-1", "l1-2", "l1-3"]
+    assert len(second_layer) == 9
+
+
+def test_run_refine_stops_when_winner_has_no_suggestions(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    def evaluator(_: Path) -> dict[str, object]:
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 80.0},
+            "final_report": {"verdict": "Fail", "suggestions": []},
+            "metrics": {
+                "avg_mi": 70.0,
+                "qa_score": 80.0,
+                "cc_issue_count": 0,
+                "hard_failed": False,
+                "qc_failed": False,
+            },
+        }
+
+    result = run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=True,
+        max_rounds=3,
+        evaluator_runner=evaluator,
+    )
+
+    assert result["rounds_completed"] == 1
+    assert result["winner_id"] == "baseline"
+    assert result["stop_reason"] == "winner has no suggestions"
+
+
+def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        if (workspace / "sample.py").read_text() == "baseline\n":
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 70.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": "Winner", "description": "Apply better layout"},
+                    ],
+                },
+                "metrics": {
+                    "avg_mi": 60.0,
+                    "qa_score": 70.0,
+                    "cc_issue_count": 1,
+                    "hard_failed": False,
+                    "qc_failed": False,
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 95.0},
+            "final_report": {
+                "verdict": "Pass",
+                "suggestions": [
+                    {"title": "Keep polishing", "description": "Still possible"},
+                ],
+            },
+            "metrics": {
+                "avg_mi": 90.0,
+                "qa_score": 95.0,
+                "cc_issue_count": 0,
+                "hard_failed": False,
+                "qc_failed": False,
+            },
+        }
+
+    class StaticApplier:
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del failure_feedback
+            (workspace / "sample.py").write_text(f"{suggestion['title']}\n")
+            return {"ok": True, "touched_files": ["sample.py"], "failure_reason": ""}
+
+    result = run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=True,
+        max_rounds=3,
+        evaluator_runner=evaluator,
+        applier=StaticApplier(),
+        self_check_runner=lambda _: (True, ""),
+    )
+
+    assert result["rounds_completed"] == 2
+    assert result["winner_id"] == "baseline"
+    assert result["stop_reason"] == "winner did not improve baseline"
+    assert (target / "sample.py").read_text() == "Winner\n"
+
+
+def test_run_refine_rejects_workspace_root_inside_target(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    with pytest.raises(ValueError, match="workspace_root"):
+        run_refine(
+            target_path=target,
+            workspace_root=target / ".harness-refine",
+            max_retries=0,
+            loop=False,
+            max_rounds=1,
+            evaluator_runner=lambda _: {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 80.0},
+                "final_report": {"verdict": "Fail", "suggestions": []},
+            },
+        )

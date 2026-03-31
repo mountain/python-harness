@@ -4,6 +4,7 @@ Command-line interface for python-harness.
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 
 from python_harness.evaluator import Evaluator
+from python_harness.refine_engine import run_refine
 
 # Try to find .env file explicitly before anything else executes
 env_path = os.path.join(os.getcwd(), '.env')
@@ -231,7 +233,7 @@ def _print_final_report(final_report: dict[str, Any]) -> None:
     suggestions = final_report.get("suggestions", [])
     if suggestions:
         console.print("[bold cyan]Top 3 Improvement Suggestions:[/bold cyan]")
-        for i, sug in enumerate(suggestions, 1):
+        for i, sug in enumerate(suggestions[:3], 1):
             console.print(
                 f"  {i}. [bold]{sug.get('title', 'Suggestion')}[/bold] "
                 f"(Target: [yellow]{sug.get('target_file', 'unknown')}[/yellow])"
@@ -242,56 +244,29 @@ def _print_final_report(final_report: dict[str, Any]) -> None:
 @app.command()
 def refine(
     path: str = typer.Argument(".", help="The path to evaluate and evolve"),
-    steps: int = typer.Option(1, help="Number of evolution steps to perform"),
-    max_retries: int = typer.Option(3, help="Maximum retries per variant if tests fail")
+    max_retries: int = typer.Option(3, help="Maximum retries per candidate"),
+    loop: bool = typer.Option(False, help="Keep refining winners across rounds"),
+    max_rounds: int = typer.Option(3, help="Maximum refine rounds when looping"),
 ) -> None:
     """
-    Refine the codebase through an agentic Edit-Test-Improve loop.
-    Generates variants based on suggestions, tests them, and picks the best.
+    Refine the codebase through a fixed two-level search and optional loop.
     """
     console.print(
-        f"[bold magenta]Starting evolution loop for path:[/bold magenta] {path} "
-        f"[dim](steps={steps}, max_retries={max_retries})[/dim]"
+        f"[bold magenta]Starting refine for path:[/bold magenta] {path} "
+        f"[dim](loop={loop}, max_rounds={max_rounds}, "
+        f"max_retries={max_retries})[/dim]"
     )
-    
-    # 1. First, run a baseline evaluation to get suggestions
-    evaluator = Evaluator(path)
-    console.print("[cyan]Running baseline evaluation...[/cyan]")
-    hard_results = evaluator.hard_evaluator.evaluate()
-    soft_results = evaluator.soft_evaluator.evaluate()
-    baseline_report = evaluator.soft_evaluator.generate_final_report(
-        hard_results, {"all_passed": True, "failures": []}, soft_results
+    target_path = Path(path).resolve()
+
+    result = run_refine(
+        target_path=target_path,
+        max_retries=max_retries,
+        loop=loop,
+        max_rounds=max_rounds,
     )
-    
-    suggestions = baseline_report.get("suggestions", [])
-    if not suggestions:
-        console.print("[yellow]No suggestions found to evolve. Exiting.[/yellow]")
-        return
-        
-    console.print(
-        f"[green]Found {len(suggestions)} suggestions. "
-        f"Starting evolution branches...[/green]"
-    )
-    
-    # TODO: Implement the Git branching and Agent modification logic here.
-    # The loop will be:
-    # for step in range(steps):
-    #   for suggestion in suggestions:
-    #     checkout new branch variant-X
-    #     for retry in range(max_retries):
-    #       ask LLM to apply suggestion to code
-    #       run pytest
-    #       if pytest passes:
-    #         run harness . to get new score
-    #         break
-    #       else:
-    #         feed error back to LLM for retry
-    #   compare all variants and checkout the best one
-    
-    console.print(
-        "[yellow]Evolution engine skeleton ready. "
-        "Actual git mutation logic pending.[/yellow]"
-    )
+    console.print(f"[green]winner_id:[/green] {result['winner_id']}")
+    console.print(f"[cyan]rounds_completed:[/cyan] {result['rounds_completed']}")
+    console.print(f"[yellow]stop_reason:[/yellow] {result['stop_reason']}")
 @app.command()
 def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> None:
     """

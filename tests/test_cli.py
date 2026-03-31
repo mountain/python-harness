@@ -2,6 +2,7 @@
 Tests for CLI functionality.
 """
 
+from pathlib import Path
 from typing import Any
 
 from typer.testing import CliRunner
@@ -305,6 +306,70 @@ def test_measure_renders_full_failure_details(monkeypatch: Any) -> None:
     assert "Top 3 Improvement Suggestions" in result.stdout
 
 
+def test_measure_limits_rendered_suggestions_to_top_three(monkeypatch: Any) -> None:
+    class DummyHardEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {
+                "all_passed": True,
+                "ruff": {"status": "success", "issues": []},
+                "mypy": {"status": "success", "output": ""},
+                "ty": {"status": "success", "output": ""},
+                "radon_cc": {"status": "success", "issues": [], "error_message": ""},
+                "radon_mi": {"status": "success", "mi_scores": {}},
+                "pytest": {"status": "success", "output": ""},
+            }
+
+    class DummyQcEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {"all_passed": True, "failures": []}
+
+    class DummySoftEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {
+                "package_summary": {
+                    "total_files": 1,
+                    "total_tokens": 1,
+                    "package_understanding": "Mock understanding",
+                },
+                "understandability_score": 100.0,
+                "qa_results": {"sampled_entities": []},
+            }
+
+        def generate_final_report(
+            self,
+            hard_results: dict[str, Any],
+            qc_results: dict[str, Any],
+            soft_results: dict[str, Any],
+        ) -> dict[str, Any]:
+            return {
+                "verdict": "Pass",
+                "summary": "Mock summary",
+                "suggestions": [
+                    {"title": "S1", "description": "d1", "target_file": "a.py"},
+                    {"title": "S2", "description": "d2", "target_file": "b.py"},
+                    {"title": "S3", "description": "d3", "target_file": "c.py"},
+                    {"title": "S4", "description": "d4", "target_file": "d.py"},
+                ],
+            }
+
+    class DummyEvaluator:
+        def __init__(self, path: str):
+            self.path = path
+            self.hard_evaluator = DummyHardEvaluator()
+            self.qc_evaluator = DummyQcEvaluator()
+            self.soft_evaluator = DummySoftEvaluator()
+
+    monkeypatch.setattr(cli_module, "Evaluator", DummyEvaluator)
+
+    result = runner.invoke(app, ["measure", "."])
+
+    assert result.exit_code == 0
+    assert "S1" in result.stdout
+    assert "S2" in result.stdout
+    assert "S3" in result.stdout
+    assert "S4" not in result.stdout
+
+
 def test_measure_returns_when_final_report_missing(monkeypatch: Any) -> None:
     """
     Test that measure returns cleanly when final report generation is empty.
@@ -360,73 +425,89 @@ def test_measure_returns_when_final_report_missing(monkeypatch: Any) -> None:
     assert "FINAL VERDICT" not in result.stdout
 
 
-def test_refine_exits_when_no_suggestions(monkeypatch: Any) -> None:
+def test_refine_delegates_to_engine(monkeypatch: Any, tmp_path: Path) -> None:
     """
-    Test that refine exits early when baseline report has no suggestions.
+    Test that refine delegates to the engine with loop-oriented options.
     """
-    class DummyHardEvaluator:
-        def evaluate(self) -> dict[str, Any]:
-            return {"all_passed": True}
+    captured: dict[str, object] = {}
 
-    class DummySoftEvaluator:
-        def evaluate(self) -> dict[str, Any]:
-            return {"status": "success"}
+    def fake_run_refine(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "rounds_completed": 1,
+            "winner_id": "l1-1",
+            "stop_reason": "single round completed",
+        }
 
-        def generate_final_report(
-            self,
-            hard_results: dict[str, Any],
-            qc_results: dict[str, Any],
-            soft_results: dict[str, Any],
-        ) -> dict[str, Any]:
-            return {"suggestions": []}
+    monkeypatch.setattr(cli_module, "run_refine", fake_run_refine)
 
-    class DummyEvaluator:
-        def __init__(self, path: str):
-            self.path = path
-            self.hard_evaluator = DummyHardEvaluator()
-            self.soft_evaluator = DummySoftEvaluator()
-
-    monkeypatch.setattr(cli_module, "Evaluator", DummyEvaluator)
-
-    result = runner.invoke(app, ["refine", "."])
+    result = runner.invoke(
+        app,
+        [
+            "refine",
+            str(tmp_path),
+            "--max-retries",
+            "2",
+            "--loop",
+            "--max-rounds",
+            "4",
+        ],
+    )
 
     assert result.exit_code == 0
-    assert "No suggestions found to evolve. Exiting." in result.stdout
+    assert captured["target_path"] == tmp_path
+    assert captured["max_retries"] == 2
+    assert captured["loop"] is True
+    assert captured["max_rounds"] == 4
+    assert "winner_id: l1-1" in result.stdout
+    assert "rounds_completed: 1" in result.stdout
+    assert "stop_reason: single round completed" in result.stdout
 
 
-def test_refine_reports_suggestions(monkeypatch: Any) -> None:
+def test_refine_defaults_to_single_round(monkeypatch: Any, tmp_path: Path) -> None:
     """
-    Test that refine reports suggestion count when baseline suggestions exist.
+    Test that refine no longer accepts steps and defaults to a single round.
     """
-    class DummyHardEvaluator:
-        def evaluate(self) -> dict[str, Any]:
-            return {"all_passed": True}
+    captured: dict[str, object] = {}
 
-    class DummySoftEvaluator:
-        def evaluate(self) -> dict[str, Any]:
-            return {"status": "success"}
+    def fake_run_refine(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "rounds_completed": 1,
+            "winner_id": "baseline",
+            "stop_reason": "single round completed",
+        }
 
-        def generate_final_report(
-            self,
-            hard_results: dict[str, Any],
-            qc_results: dict[str, Any],
-            soft_results: dict[str, Any],
-        ) -> dict[str, Any]:
-            return {"suggestions": [{"title": "one"}, {"title": "two"}]}
+    monkeypatch.setattr(cli_module, "run_refine", fake_run_refine)
 
-    class DummyEvaluator:
-        def __init__(self, path: str):
-            self.path = path
-            self.hard_evaluator = DummyHardEvaluator()
-            self.soft_evaluator = DummySoftEvaluator()
-
-    monkeypatch.setattr(cli_module, "Evaluator", DummyEvaluator)
-
-    result = runner.invoke(app, ["refine", "."])
+    result = runner.invoke(app, ["refine", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert "Found 2 suggestions. Starting evolution branches..." in result.stdout
-    assert "Evolution engine skeleton ready." in result.stdout
+    assert captured["target_path"] == tmp_path
+    assert captured["max_retries"] == 3
+    assert captured["loop"] is False
+    assert captured["max_rounds"] == 3
+
+
+def test_refine_resolves_relative_target_path(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_refine(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "rounds_completed": 1,
+            "winner_id": "baseline",
+            "stop_reason": "single round completed",
+        }
+
+    monkeypatch.setattr(cli_module, "run_refine", fake_run_refine)
+
+    with runner.isolated_filesystem():
+        result = runner.invoke(app, ["refine", "."])
+        expected_path = Path.cwd().resolve()
+
+    assert result.exit_code == 0
+    assert captured["target_path"] == expected_path
 
 
 def test_measure_surfaces_hard_tool_errors(monkeypatch: Any) -> None:
