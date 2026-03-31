@@ -18,6 +18,20 @@ def test_create_candidate_workspace_copies_parent_tree(tmp_path: Path) -> None:
     assert (workspace / "sample.py").read_text() == "print('parent')\n"
 
 
+def test_create_candidate_workspace_ignores_workspace_root_inside_parent(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / "sample.py").write_text("print('parent')\n")
+    root = parent / ".harness-refine"
+    workspace = create_candidate_workspace(parent, root, "candidate-1")
+
+    assert workspace == root / "candidate-1"
+    assert (workspace / "sample.py").read_text() == "print('parent')\n"
+    assert not (workspace / ".harness-refine").exists()
+
+
 def test_adopt_candidate_workspace_replaces_target_contents(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

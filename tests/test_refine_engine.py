@@ -499,15 +499,38 @@ def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
     assert (target / "sample.py").read_text() == "Winner\n"
 
 
-def test_run_refine_rejects_workspace_root_inside_target(tmp_path: Path) -> None:
+def test_run_refine_accepts_direct_child_workspace_root(tmp_path: Path) -> None:
     target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    result = run_refine(
+        target_path=target,
+        workspace_root=target / ".harness-refine",
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        evaluator_runner=lambda _: {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 80.0},
+            "final_report": {"verdict": "Fail", "suggestions": []},
+        },
+    )
+
+    assert result["stop_reason"] == "single round completed"
+
+
+def test_run_refine_rejects_nested_workspace_root_inside_target(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    nested = target / "nested" / ".harness-refine"
     target.mkdir()
     (target / "sample.py").write_text("print('baseline')\n")
 
     with pytest.raises(ValueError, match="workspace_root"):
         run_refine(
             target_path=target,
-            workspace_root=target / ".harness-refine",
+            workspace_root=nested,
             max_retries=0,
             loop=False,
             max_rounds=1,
