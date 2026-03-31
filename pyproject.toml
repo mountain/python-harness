@@ -1,6 +1,6 @@
 [project]
 name = "python-harness"
-version = "0.0.10"
+version = "0.0.11"
 description = "An agentic codebase evaluation and evolution tool for Python projects."
 requires-python = ">=3.10"
 readme = "README.md"
@@ -17,16 +17,16 @@ dependencies = [
     "tenacity>=8.2.0",
     "tiktoken>=0.6.0",
     "python-dotenv>=1.0.0",
-]
-
-[project.optional-dependencies]
-dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
     "mypy>=1.9.0",
-    "ty>=0.0.1", # Assuming ty is available or will be replaced with actual LSP integration
     "radon>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ty>=0.0.1", # Assuming ty is available or will be replaced with actual LSP integration
 ]
 
 [build-system]

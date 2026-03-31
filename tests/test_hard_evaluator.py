@@ -287,6 +287,49 @@ def test_run_mypy_returns_stdout(monkeypatch: Any) -> None:
     assert "error: nope" in result["output"]
 
 
+def test_run_ruff_surfaces_stderr_when_no_json_issues(monkeypatch: Any) -> None:
+    """
+    Test that run_ruff preserves stderr when Ruff fails before emitting JSON.
+    """
+    def mock_run(args: Any, **kwargs: Any) -> Any:
+        class MockResult:
+            returncode = 1
+            stdout = ""
+            stderr = "No module named ruff"
+
+        return MockResult()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    evaluator = HardEvaluator(".")
+    result = evaluator.run_ruff()
+
+    assert result["status"] == "failed"
+    assert result["issues"] == []
+    assert result["error_message"] == "No module named ruff"
+
+
+def test_run_mypy_surfaces_stderr(monkeypatch: Any) -> None:
+    """
+    Test that run_mypy preserves stderr when mypy fails before stdout output.
+    """
+    def mock_run(args: Any, **kwargs: Any) -> Any:
+        class MockResult:
+            returncode = 1
+            stdout = ""
+            stderr = "No module named mypy"
+
+        return MockResult()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    evaluator = HardEvaluator(".")
+    result = evaluator.run_mypy()
+
+    assert result["status"] == "failed"
+    assert result["output"] == "No module named mypy"
+
+
 def test_run_radon_mi_reads_scores(monkeypatch: Any) -> None:
     """
     Test that run_radon_mi parses maintainability scores from JSON.
@@ -306,6 +349,27 @@ def test_run_radon_mi_reads_scores(monkeypatch: Any) -> None:
 
     assert result["status"] == "success"
     assert result["mi_scores"] == {"a.py": 77.0}
+
+
+def test_run_pytest_surfaces_stderr(monkeypatch: Any, tmp_path: Path) -> None:
+    """
+    Test that run_pytest preserves stderr when pytest fails early.
+    """
+    def mock_run(args: Any, **kwargs: Any) -> Any:
+        class MockResult:
+            returncode = 1
+            stdout = ""
+            stderr = "No module named pytest"
+
+        return MockResult()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    evaluator = HardEvaluator(str(tmp_path))
+    result = evaluator.run_pytest()
+
+    assert result["status"] == "failed"
+    assert result["error_message"] == "No module named pytest"
 
 
 def test_evaluate_fails_when_coverage_report_missing(monkeypatch: Any) -> None:

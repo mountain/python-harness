@@ -427,3 +427,77 @@ def test_refine_reports_suggestions(monkeypatch: Any) -> None:
     assert result.exit_code == 0
     assert "Found 2 suggestions. Starting evolution branches..." in result.stdout
     assert "Evolution engine skeleton ready." in result.stdout
+
+
+def test_measure_surfaces_hard_tool_errors(monkeypatch: Any) -> None:
+    """
+    Test that measure prints hard-tool error details when tool invocations fail early.
+    """
+    class DummyHardEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {
+                "all_passed": False,
+                "ruff": {
+                    "status": "failed",
+                    "issues": [],
+                    "error_message": "No module named ruff",
+                },
+                "mypy": {"status": "failed", "output": "No module named mypy"},
+                "ty": {
+                    "status": "warning",
+                    "error_message": "ty executable not found. Skipping ty checks.",
+                },
+                "radon_cc": {
+                    "status": "warning",
+                    "issues": [],
+                    "error_message": "No module named radon",
+                },
+                "radon_mi": {"status": "success", "mi_scores": {}},
+                "pytest": {
+                    "status": "failed",
+                    "error_message": "No module named pytest",
+                },
+            }
+
+    class DummyQcEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {"all_passed": True, "failures": []}
+
+    class DummySoftEvaluator:
+        def evaluate(self) -> dict[str, Any]:
+            return {
+                "package_summary": {
+                    "total_files": 1,
+                    "total_tokens": 1,
+                    "package_understanding": "Mock understanding",
+                },
+                "understandability_score": 100.0,
+                "qa_results": {"sampled_entities": []},
+            }
+
+        def generate_final_report(
+            self,
+            hard_results: dict[str, Any],
+            qc_results: dict[str, Any],
+            soft_results: dict[str, Any],
+        ) -> dict[str, Any]:
+            return {"verdict": "Fail", "summary": "Mock summary", "suggestions": []}
+
+    class DummyEvaluator:
+        def __init__(self, path: str):
+            self.path = path
+            self.hard_evaluator = DummyHardEvaluator()
+            self.qc_evaluator = DummyQcEvaluator()
+            self.soft_evaluator = DummySoftEvaluator()
+
+    monkeypatch.setattr(cli_module, "Evaluator", DummyEvaluator)
+
+    result = runner.invoke(app, ["measure", "."])
+
+    assert result.exit_code == 1
+    assert "Ruff issues found" in result.stdout
+    assert "No module named ruff" in result.stdout
+    assert "Mypy issues found" in result.stdout
+    assert "No module named mypy" in result.stdout
+    assert "Pytest/Coverage issues found" in result.stdout
+    assert "No module named pytest" in result.stdout

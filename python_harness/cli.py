@@ -33,13 +33,18 @@ def _print_detail_block(title: str, details: str, color: str) -> None:
     console.print()
 
 
-def _print_ruff_issues(issues: list[dict[str, Any]]) -> None:
+def _print_ruff_issues(
+    issues: list[dict[str, Any]],
+    error_message: str = "",
+) -> None:
     console.print("[red]Ruff issues found:[/red]")
     for issue in issues:
         file = issue.get("filename", "unknown")
         line = issue.get("location", {}).get("row", "?")
         msg = issue.get("message", "unknown issue")
         console.print(f"  - {file}:{line} {msg}")
+    if not issues and error_message:
+        console.print(f"  {error_message}")
     console.print()
 
 
@@ -99,7 +104,10 @@ def _print_hard_failure_details(hard_results: dict[str, Any]) -> None:
 
     ruff_issues = hard_results.get("ruff", {}).get("issues", [])
     if hard_results.get("ruff", {}).get("status") != "success":
-        _print_ruff_issues(ruff_issues)
+        _print_ruff_issues(
+            ruff_issues,
+            str(hard_results.get("ruff", {}).get("error_message", "")),
+        )
 
     if hard_results.get("mypy", {}).get("status") != "success":
         output = str(hard_results.get("mypy", {}).get("output", ""))

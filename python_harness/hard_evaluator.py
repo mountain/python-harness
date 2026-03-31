@@ -47,6 +47,7 @@ class HardEvaluator:
                 "status": status,
                 "issues": issues,
                 "return_code": result.returncode,
+                "error_message": result.stderr.strip(),
             }
         except Exception as e:
             return {"status": "error", "error_message": str(e)}
@@ -65,7 +66,7 @@ class HardEvaluator:
             status = "success" if result.returncode == 0 else "failed"
             return {
                 "status": status,
-                "output": result.stdout,
+                "output": result.stdout or result.stderr,
                 "return_code": result.returncode,
             }
         except Exception as e:
@@ -243,6 +244,7 @@ class HardEvaluator:
                 "output": result.stdout,
                 "return_code": result.returncode,
                 "coverage_percentage": coverage_percentage,
+                "error_message": result.stderr.strip(),
             }
         except subprocess.TimeoutExpired:
             return {
