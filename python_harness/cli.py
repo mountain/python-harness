@@ -104,7 +104,7 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
         if hard_results["mypy"]["status"] != "success":
             output = hard_results["mypy"].get("output", "")
             console.print(f"[red]Mypy issues found:[/red]\n{output}")
-        if hard_results["ty"]["status"] != "success":
+        if hard_results["ty"]["status"] not in ("success", "warning"):
             output = hard_results["ty"].get("output", "")
             # ty might print to stderr instead of stdout, or it might be missing
             error_msg = hard_results["ty"].get("error_message", "")
@@ -116,6 +116,9 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
                 console.print(
                     "[red]Ty failed, but no standard output was captured.[/red]"
                 )
+        elif hard_results["ty"]["status"] == "warning":
+            msg = hard_results["ty"].get("error_message", "ty not found")
+            console.print(f"[yellow]Ty warning:[/yellow] {msg}")
         if hard_results["radon_cc"]["status"] != "success":
             issues = hard_results["radon_cc"].get("issues", [])
             console.print(
