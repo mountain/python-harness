@@ -373,7 +373,10 @@ class SoftEvaluator:
         }
 
     def generate_final_report(
-        self, hard_results: dict[str, Any], soft_results: dict[str, Any]
+        self,
+        hard_results: dict[str, Any],
+        qc_results: dict[str, Any],
+        soft_results: dict[str, Any]
     ) -> dict[str, Any]:
         """
         Synthesize all evaluation results into a final verdict and exactly 
@@ -408,25 +411,48 @@ class SoftEvaluator:
             mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
             avg_mi = sum(mi_scores.values()) / len(mi_scores) if mi_scores else 100.0
             
+            # Extract failures
+            hard_failed = not hard_results.get("all_passed", True)
+            
+            hard_errors = []
+            if hard_failed:
+                if hard_results.get("ruff", {}).get("status") != "success":
+                    hard_errors.append("Linter (Ruff) failed.")
+                if hard_results.get("mypy", {}).get("status") != "success":
+                    hard_errors.append("Type checker (Mypy) failed.")
+                if hard_results.get("pytest", {}).get("status") != "success":
+                    pytest_err = hard_results.get("pytest", {}).get(
+                        "error_message", "Tests or Coverage failed."
+                    )
+                    hard_errors.append(pytest_err)
+            
+            qc_errors = qc_results.get("failures", [])
+            
             qa_score = soft_results.get("understandability_score", 100.0)
             qa_entities = soft_results.get("qa_results", {}).get("sampled_entities", [])
             
             sys_prompt = (
                 "You are an elite Python Codebase Evaluator. You have just analyzed "
                 "a repository. Your task is to provide a final judgment and EXACTLY "
-                "3 concrete, actionable improvement suggestions. These suggestions "
-                "MUST NOT change the external functionality (they are refactoring/"
-                "quality improvements).\n\n"
+                "3 concrete, actionable improvement suggestions.\n"
+                "If the codebase failed its Hard or QC evaluations (e.g. tests "
+                "failed, coverage is low, or governance violated), your suggestions "
+                "MUST prioritize fixing those issues.\n"
+                "Otherwise, focus on refactoring/quality improvements without "
+                "changing external functionality.\n\n"
                 "Output MUST be in valid JSON matching this schema:\n"
                 "{\n"
                 '  "verdict": "Pass" or "Fail",\n'
-                '  "summary": "One paragraph summary of codebase health",\n'
+                '  "summary": "One paragraph summary of codebase health and '
+                'any critical failures",\n'
                 '  "suggestions": [\n'
                 '    {"title": "str", "description": "str", "target_file": "str"}\n'
                 "  ]\n"
                 "}\n"
-                "Rule for Verdict: Pass if Average Maintainability > 50 and "
-                "QA Score > 75 and no Critical CC issues (>15). Otherwise Fail."
+                "Rule for Verdict: If there are Hard Failures or QC Failures, "
+                "verdict MUST be Fail. Otherwise, Pass if Average Maintainability "
+                "> 50 and QA Score > 75 and no Critical CC issues (>15). "
+                "Otherwise Fail."
             )
 
             user_content = (
@@ -435,6 +461,11 @@ class SoftEvaluator:
                 f"- Number of functions with Cyclomatic Complexity > 15: "
                 f"{len(cc_issues)}\n"
                 f"- Agent QA Readability Score: {qa_score:.1f}/100\n\n"
+                f"Failures (Prioritize these!):\n"
+                f"- Hard Evaluation Errors: "
+                f"{hard_errors if hard_errors else 'None'}\n"
+                f"- QC/Governance Errors: "
+                f"{qc_errors if qc_errors else 'None'}\n\n"
                 f"QA Feedback Snippets:\n"
                 + "\n".join(
                     [f"  * {q['entity']}: {q['feedback']}" for q in qa_entities]

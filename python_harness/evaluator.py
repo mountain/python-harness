@@ -30,7 +30,7 @@ class Evaluator:
 
         # Generate Final Synthesized Report with 3 Suggestions
         final_report = self.soft_evaluator.generate_final_report(
-            hard_results, soft_results
+            hard_results, qc_results, soft_results
         )
 
         return {

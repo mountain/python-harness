@@ -223,13 +223,29 @@ class HardEvaluator:
         ty_res = self.run_ty()
         radon_cc_res = self.run_radon_cc()
         radon_mi_res = self.run_radon_mi()
-        # pytest_res = self.run_pytest() # Better handled as a separate stage
+        pytest_res = self.run_pytest()
         
+        # Parse pytest coverage to check if it's < 90%
+        cov_percentage = 0.0
+        if pytest_res.get("status") == "success" and pytest_res.get("output"):
+            try:
+                cov_data = json.loads(pytest_res["output"])
+                cov_percentage = cov_data.get("totals", {}).get("percent_covered", 0.0)
+                if cov_percentage < 90.0:
+                    pytest_res["status"] = "failed"
+                    pytest_res["error_message"] = (
+                        f"Test coverage is {cov_percentage:.2f}%, "
+                        f"which is below the 90% threshold."
+                    )
+            except Exception:
+                pass
+
         all_passed = (
             ruff_res.get("status") == "success" and 
             mypy_res.get("status") == "success" and
             ty_res.get("status") in ("success", "warning") and
-            radon_cc_res.get("status") in ("success", "warning")
+            radon_cc_res.get("status") in ("success", "warning") and
+            pytest_res.get("status") == "success"
         )
 
         return {
@@ -238,5 +254,6 @@ class HardEvaluator:
             "mypy": mypy_res,
             "ty": ty_res,
             "radon_cc": radon_cc_res,
-            "radon_mi": radon_mi_res
+            "radon_mi": radon_mi_res,
+            "pytest": pytest_res
         }

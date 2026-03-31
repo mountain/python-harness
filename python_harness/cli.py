@@ -141,10 +141,21 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
                     "[red]Radon CC failed but no specific issues were parsed.[/red]"
                 )
         elif hard_results["radon_cc"]["status"] == "warning":
-            console.print(f"[yellow]Radon CC warning:[/yellow] {hard_results['radon_cc'].get('error_message')}")
-        sys.exit(1)
+            err_msg = hard_results['radon_cc'].get('error_message')
+            console.print(f"[yellow]Radon CC warning:[/yellow] {err_msg}")
         
-    console.print("[bold green]Hard Evaluation Passed![/bold green]")
+        if hard_results.get("pytest", {}).get("status") == "failed":
+            error_msg = hard_results["pytest"].get("error_message", "Tests failed")
+            console.print(f"[red]Pytest/Coverage issues found:[/red] {error_msg}")
+        
+        # DO NOT sys.exit(1) here anymore!
+        # We want to generate the report even if it fails.
+        console.print(
+            "[yellow]Continuing to soft evaluation to generate "
+            "suggestions despite hard failures...[/yellow]"
+        )
+    else:
+        console.print("[bold green]Hard Evaluation Passed![/bold green]")
     
     # Print Maintainability Index scorecard
     mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
@@ -167,11 +178,15 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
         )
         for failure in qc_results["failures"]:
             console.print(f"[red]- {failure}[/red]")
-        sys.exit(1)
-        
-    console.print(
-        "[bold green]Governance QC Passed! (Change is admissible)[/bold green]"
-    )
+        # DO NOT sys.exit(1) here! We want to generate suggestions for QC failures too.
+        console.print(
+            "[yellow]Continuing to soft evaluation to generate "
+            "suggestions despite QC failures...[/yellow]"
+        )
+    else:
+        console.print(
+            "[bold green]Governance QC Passed! (Change is admissible)[/bold green]"
+        )
 
     # 3. Soft Evaluation/Readability (Third Fence)
     console.print(
@@ -206,8 +221,9 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
     console.print("\n[yellow]Evaluation completed. Generating report...[/yellow]\n")
     
     # Generate Final Report
+    # Pass all results to the reporter so it knows *why* things failed
     final_report = evaluator.soft_evaluator.generate_final_report(
-        hard_results, soft_results
+        hard_results, qc_results, soft_results
     )
     
     if final_report:
