@@ -94,13 +94,28 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
     if not hard_results["all_passed"]:
         console.print("[bold red]Hard Evaluation Failed! Exiting.[/bold red]")
         if hard_results["ruff"]["status"] != "success":
-            console.print("[red]Ruff issues found.[/red]")
+            console.print("[red]Ruff issues found:[/red]")
+            # Assuming ruff output is JSON as configured in HardEvaluator
+            for issue in hard_results["ruff"].get("issues", []):
+                file = issue.get("filename", "unknown")
+                line = issue.get("location", {}).get("row", "?")
+                msg = issue.get("message", "unknown issue")
+                console.print(f"  - {file}:{line} {msg}")
         if hard_results["mypy"]["status"] != "success":
             output = hard_results["mypy"].get("output", "")
             console.print(f"[red]Mypy issues found:[/red]\n{output}")
         if hard_results["ty"]["status"] != "success":
             output = hard_results["ty"].get("output", "")
-            console.print(f"[red]Ty issues found:[/red]\n{output}")
+            # ty might print to stderr instead of stdout, or it might be missing
+            error_msg = hard_results["ty"].get("error_message", "")
+            if output:
+                console.print(f"[red]Ty issues found:[/red]\n{output}")
+            elif error_msg:
+                console.print(f"[red]Ty error:[/red]\n{error_msg}")
+            else:
+                console.print(
+                    "[red]Ty failed, but no standard output was captured.[/red]"
+                )
         if hard_results["radon_cc"]["status"] != "success":
             issues = hard_results["radon_cc"].get("issues", [])
             console.print(

@@ -72,9 +72,11 @@ class HardEvaluator:
                 check=False
             )
             status = "success" if result.returncode == 0 else "failed"
+            # ty might print to stderr
+            output = result.stdout if result.stdout else result.stderr
             return {
                 "status": status,
-                "output": result.stdout,
+                "output": output,
                 "return_code": result.returncode,
             }
         except Exception as e:
