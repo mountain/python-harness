@@ -86,6 +86,12 @@ class HardEvaluator:
                 "error_message": "ty executable not found. Skipping ty checks."
             }
         except Exception as e:
+            # Handle cases where ty is found but fails to run or throws other OS errors
+            if "No such file or directory: 'ty'" in str(e):
+                return {
+                    "status": "warning", 
+                    "error_message": "ty executable not found. Skipping ty checks."
+                }
             return {"status": "error", "error_message": str(e)}
 
     def run_radon_cc(self) -> dict[str, Any]:
