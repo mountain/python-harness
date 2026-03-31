@@ -501,3 +501,17 @@ def test_measure_surfaces_hard_tool_errors(monkeypatch: Any) -> None:
     assert "No module named mypy" in result.stdout
     assert "Pytest/Coverage issues found" in result.stdout
     assert "No module named pytest" in result.stdout
+
+
+def test_mi_scorecard_uses_warning_color_below_70() -> None:
+    """
+    Test that MI below 70 is no longer rendered as healthy green.
+    """
+    assert cli_module._mi_scorecard_color(65.0) == "yellow"
+
+
+def test_mi_scorecard_uses_green_at_70() -> None:
+    """
+    Test that MI 70 is rendered at the healthy threshold.
+    """
+    assert cli_module._mi_scorecard_color(70.0) == "green"

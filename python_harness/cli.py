@@ -21,6 +21,8 @@ else:
 
 app = typer.Typer(help="Agentic harness tool for universal Python codebase evaluation.")
 console = Console()
+MI_HEALTHY_THRESHOLD = 70.0
+MI_WARNING_THRESHOLD = 40.0
 
 
 def _print_detail_block(title: str, details: str, color: str) -> None:
@@ -133,13 +135,21 @@ def _print_hard_evaluation_summary(hard_results: dict[str, Any]) -> None:
     _print_hard_failure_details(hard_results)
 
 
+def _mi_scorecard_color(avg_mi: float) -> str:
+    if avg_mi >= MI_HEALTHY_THRESHOLD:
+        return "green"
+    if avg_mi >= MI_WARNING_THRESHOLD:
+        return "yellow"
+    return "red"
+
+
 def _print_mi_scorecard(hard_results: dict[str, Any]) -> None:
     mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
     if not mi_scores:
         return
 
     avg_mi = sum(mi_scores.values()) / len(mi_scores)
-    color = "green" if avg_mi > 50 else "yellow" if avg_mi > 20 else "red"
+    color = _mi_scorecard_color(avg_mi)
     console.print(f"[{color}]Average Maintainability Index: {avg_mi:.1f}/100[/{color}]")
 
 

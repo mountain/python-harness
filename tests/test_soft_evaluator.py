@@ -111,6 +111,66 @@ def test_generate_final_report_mock_fails_on_hard_failure() -> None:
             os.environ["LLM_API_KEY"] = old_key
 
 
+def test_determine_verdict_fails_below_mi_70(tmp_path: Path) -> None:
+    """
+    Test that MI below 70 no longer qualifies for a passing verdict.
+    """
+    evaluator = SoftEvaluator(str(tmp_path))
+
+    verdict = evaluator._determine_verdict(
+        {
+            "hard_failed": False,
+            "qc_failed": False,
+            "avg_mi": 65.0,
+            "qa_score": 90.0,
+            "cc_issues": [],
+        }
+    )
+
+    assert verdict == "Fail"
+
+
+def test_determine_verdict_passes_at_mi_70(tmp_path: Path) -> None:
+    """
+    Test that MI of 70 is sufficient for a passing verdict.
+    """
+    evaluator = SoftEvaluator(str(tmp_path))
+
+    verdict = evaluator._determine_verdict(
+        {
+            "hard_failed": False,
+            "qc_failed": False,
+            "avg_mi": 70.0,
+            "qa_score": 90.0,
+            "cc_issues": [],
+        }
+    )
+
+    assert verdict == "Pass"
+
+
+def test_final_report_prompt_mentions_mi_70_threshold(tmp_path: Path) -> None:
+    """
+    Test that the final report prompt advertises the updated MI threshold.
+    """
+    evaluator = SoftEvaluator(str(tmp_path))
+
+    messages = evaluator._build_final_report_messages(
+        {
+            "avg_mi": 70.0,
+            "cc_issues": [],
+            "qa_score": 90.0,
+            "hard_errors": [],
+            "qc_errors": [],
+            "qa_entities": [],
+            "hard_failed": False,
+            "qc_failed": False,
+        }
+    )
+
+    assert "Average Maintainability >= 70" in messages[0]["content"]
+
+
 def test_read_file_text_helper_reads_utf8_content(tmp_path: Path) -> None:
     """
     Test that the file-reading helper returns UTF-8 text content.
@@ -145,6 +205,8 @@ def test_get_python_files_filters_hidden_and_virtualenv_dirs(tmp_path: Path) -> 
     (tmp_path / "venv" / "skip.py").write_text("x = 1\n")
     (tmp_path / "vendors").mkdir()
     (tmp_path / "vendors" / "skip.py").write_text("x = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_skip.py").write_text("x = 1\n")
 
     evaluator = SoftEvaluator(str(tmp_path))
 

@@ -11,6 +11,8 @@ from typing import Any
 
 from rich.console import Console
 
+from python_harness.python_file_inventory import collect_python_files
+
 console = Console()
 PYTEST_TIMEOUT_SECONDS = 60
 
@@ -21,6 +23,9 @@ class HardEvaluator:
 
     def __init__(self, target_path: str):
         self.target_path = Path(target_path).resolve()
+
+    def _radon_metric_targets(self) -> list[str]:
+        return [str(file_path) for file_path in collect_python_files(self.target_path)]
 
     def run_ruff(self) -> dict[str, Any]:
         """
@@ -112,6 +117,14 @@ class HardEvaluator:
         Flag any function/method with CC > 15 as a failure.
         """
         try:
+            targets = self._radon_metric_targets()
+            if not targets:
+                return {
+                    "status": "success",
+                    "issues": [],
+                    "return_code": 0,
+                    "output": "",
+                }
             result = subprocess.run(
                 [
                     sys.executable,
@@ -120,7 +133,7 @@ class HardEvaluator:
                     "cc",
                     "-j",
                     "-a",
-                    str(self.target_path),
+                    *targets,
                 ],
                 capture_output=True,
                 text=True,
@@ -178,8 +191,11 @@ class HardEvaluator:
         but it contributes to the scorecard.
         """
         try:
+            targets = self._radon_metric_targets()
+            if not targets:
+                return {"status": "success", "mi_scores": {}, "return_code": 0}
             result = subprocess.run(
-                [sys.executable, "-m", "radon", "mi", "-j", str(self.target_path)],
+                [sys.executable, "-m", "radon", "mi", "-j", *targets],
                 capture_output=True,
                 text=True,
                 check=False

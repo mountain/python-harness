@@ -79,6 +79,7 @@ def test_radon_cc_syntax_error(monkeypatch: Any, tmp_path: Path) -> None:
     # and writing an error to stderr (which happens when there are syntax errors)
     import subprocess
     original_run = subprocess.run
+    (tmp_path / "bad.py").write_text("def broken(:\n")
     
     def mock_run(args: Any, **kwargs: Any) -> Any:
         # Check if the command is for radon cc (sys.executable, -m, radon, cc)
@@ -370,6 +371,21 @@ def test_run_pytest_surfaces_stderr(monkeypatch: Any, tmp_path: Path) -> None:
 
     assert result["status"] == "failed"
     assert result["error_message"] == "No module named pytest"
+
+
+def test_radon_mi_targets_exclude_test_files(tmp_path: Path) -> None:
+    """
+    Test that maintainability scoring ignores test files and directories.
+    """
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "keep.py").write_text("x = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_skip.py").write_text("x = 1\n")
+    (tmp_path / "test_skip.py").write_text("x = 1\n")
+
+    evaluator = HardEvaluator(str(tmp_path))
+
+    assert evaluator._radon_metric_targets() == [str(tmp_path / "pkg" / "keep.py")]
 
 
 def test_evaluate_fails_when_coverage_report_missing(monkeypatch: Any) -> None:
