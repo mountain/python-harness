@@ -90,6 +90,6 @@ def test_radon_cc_syntax_error(monkeypatch: Any, tmp_path: Path) -> None:
     result = evaluator.run_radon_cc()
     
     assert result["status"] == "failed"
-    assert len(result["issues"]) == 0
+    assert len(result.get("issues", [])) == 0
     # Radon should output to stderr because of the syntax error
     assert "SyntaxError" in result["error_message"] or result["return_code"] != 0

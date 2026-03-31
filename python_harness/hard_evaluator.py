@@ -136,7 +136,19 @@ class HardEvaluator:
                 "output": result.stdout,
                 "error_message": result.stderr if result.returncode != 0 else ""
             }
+        except FileNotFoundError:
+            return {
+                "status": "warning", 
+                "issues": [],
+                "error_message": "radon executable not found. Please install it."
+            }
         except Exception as e:
+            if "No such file or directory: 'radon'" in str(e):
+                return {
+                    "status": "warning", 
+                    "issues": [],
+                    "error_message": "radon executable not found. Please install it."
+                }
             return {"status": "error", "error_message": str(e)}
 
     def run_radon_mi(self) -> dict[str, Any]:
@@ -164,7 +176,19 @@ class HardEvaluator:
                 "mi_scores": mi_scores,
                 "return_code": result.returncode,
             }
+        except FileNotFoundError:
+            return {
+                "status": "warning",
+                "mi_scores": {},
+                "error_message": "radon executable not found. Please install it."
+            }
         except Exception as e:
+            if "No such file or directory: 'radon'" in str(e):
+                return {
+                    "status": "warning",
+                    "mi_scores": {},
+                    "error_message": "radon executable not found. Please install it."
+                }
             return {"status": "error", "error_message": str(e)}
 
     def run_pytest(self) -> dict[str, Any]:
@@ -205,7 +229,7 @@ class HardEvaluator:
             ruff_res.get("status") == "success" and 
             mypy_res.get("status") == "success" and
             ty_res.get("status") in ("success", "warning") and
-            radon_cc_res.get("status") == "success"
+            radon_cc_res.get("status") in ("success", "warning")
         )
 
         return {

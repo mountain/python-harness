@@ -140,6 +140,8 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
                 console.print(
                     "[red]Radon CC failed but no specific issues were parsed.[/red]"
                 )
+        elif hard_results["radon_cc"]["status"] == "warning":
+            console.print(f"[yellow]Radon CC warning:[/yellow] {hard_results['radon_cc'].get('error_message')}")
         sys.exit(1)
         
     console.print("[bold green]Hard Evaluation Passed![/bold green]")

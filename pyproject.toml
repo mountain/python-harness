@@ -1,6 +1,6 @@
 [project]
 name = "python-harness"
-version = "0.0.6"
+version = "0.0.7"
 description = "An agentic codebase evaluation and evolution tool for Python projects."
 requires-python = ">=3.10"
 readme = "README.md"
