@@ -75,7 +75,8 @@ def test_radon_cc_syntax_error(monkeypatch: Any, tmp_path: Path) -> None:
     original_run = subprocess.run
     
     def mock_run(args: Any, **kwargs: Any) -> Any:
-        if args and args[0] == "radon" and args[1] == "cc":
+        # Check if the command is for radon cc (sys.executable, -m, radon, cc)
+        if args and len(args) >= 4 and args[1] == "-m" and args[2] == "radon" and args[3] == "cc":
             # Simulate radon failing on syntax error
             class MockResult:
                 returncode = 1

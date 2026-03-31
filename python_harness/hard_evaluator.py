@@ -2,6 +2,7 @@
 Core module for integrating hard evaluation tools like ruff, mypy, and pytest.
 """
 
+import sys
 import json
 import subprocess
 from pathlib import Path
@@ -25,7 +26,7 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                ["ruff", "check", str(self.target_path), "--output-format", "json"],
+                [sys.executable, "-m", "ruff", "check", str(self.target_path), "--output-format", "json"],
                 capture_output=True,
                 text=True,
                 check=False
@@ -46,7 +47,7 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                ["mypy", str(self.target_path)],
+                [sys.executable, "-m", "mypy", str(self.target_path)],
                 capture_output=True,
                 text=True,
                 check=False
@@ -101,7 +102,7 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                ["radon", "cc", "-j", "-a", str(self.target_path)],
+                [sys.executable, "-m", "radon", "cc", "-j", "-a", str(self.target_path)],
                 capture_output=True,
                 text=True,
                 check=False
@@ -143,7 +144,7 @@ class HardEvaluator:
                 "error_message": "radon executable not found. Please install it."
             }
         except Exception as e:
-            if "No such file or directory: 'radon'" in str(e):
+            if "No module named radon" in str(e) or "radon" in str(e):
                 return {
                     "status": "warning", 
                     "issues": [],
@@ -159,7 +160,7 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                ["radon", "mi", "-j", str(self.target_path)],
+                [sys.executable, "-m", "radon", "mi", "-j", str(self.target_path)],
                 capture_output=True,
                 text=True,
                 check=False
@@ -183,7 +184,7 @@ class HardEvaluator:
                 "error_message": "radon executable not found. Please install it."
             }
         except Exception as e:
-            if "No such file or directory: 'radon'" in str(e):
+            if "No module named radon" in str(e) or "radon" in str(e):
                 return {
                     "status": "warning",
                     "mi_scores": {},
@@ -199,7 +200,7 @@ class HardEvaluator:
             # When pytest is run within pytest, it can cause issues or hang.
             # Here we just run it as a subprocess to gather results.
             result = subprocess.run(
-                ["pytest", str(self.target_path), "--cov", "--cov-report=json"],
+                [sys.executable, "-m", "pytest", str(self.target_path), "--cov", "--cov-report=json"],
                 capture_output=True,
                 text=True,
                 check=False
