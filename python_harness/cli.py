@@ -23,13 +23,13 @@ console = Console()
 
 
 @app.command()
-def evolve(
+def refine(
     path: str = typer.Argument(".", help="The path to evaluate and evolve"),
     steps: int = typer.Option(1, help="Number of evolution steps to perform"),
     max_retries: int = typer.Option(3, help="Maximum retries per variant if tests fail")
 ) -> None:
     """
-    [Hidden] Run the QC evolution loop: Edit -> Test -> Improve.
+    Refine the codebase through an agentic Edit-Test-Improve loop.
     Generates variants based on suggestions, tests them, and picks the best.
     """
     console.print(
@@ -76,12 +76,13 @@ def evolve(
         "Actual git mutation logic pending.[/yellow]"
     )
 @app.command()
-def run(path: str = typer.Argument(".", help="The path to evaluate")) -> None:
+def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> None:
     """
-    Run the full harness evaluation on the specified path.
+    Measure the codebase against hard, soft, and governance constraints.
+    Outputs a final report with scores and actionable improvement suggestions.
     """
     console.print(
-        f"[bold green]Starting harness evaluation for path:[/bold green] {path}"
+        f"[bold green]Starting harness measurement for path:[/bold green] {path}"
     )
     
     evaluator = Evaluator(path)
