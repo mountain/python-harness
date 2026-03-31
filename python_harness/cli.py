@@ -4,6 +4,7 @@ Command-line interface for python-harness.
 
 import os
 import sys
+from typing import Any
 
 import typer
 from dotenv import load_dotenv
@@ -20,6 +21,204 @@ else:
 
 app = typer.Typer(help="Agentic harness tool for universal Python codebase evaluation.")
 console = Console()
+
+
+def _print_detail_block(title: str, details: str, color: str) -> None:
+    normalized_details = [
+        line.rstrip() for line in details.splitlines() if line.strip()
+    ]
+    console.print(f"[{color}]{title}:[/{color}]")
+    for line in normalized_details:
+        console.print(f"  {line}")
+    console.print()
+
+
+def _print_ruff_issues(issues: list[dict[str, Any]]) -> None:
+    console.print("[red]Ruff issues found:[/red]")
+    for issue in issues:
+        file = issue.get("filename", "unknown")
+        line = issue.get("location", {}).get("row", "?")
+        msg = issue.get("message", "unknown issue")
+        console.print(f"  - {file}:{line} {msg}")
+    console.print()
+
+
+def _print_ty_result(ty_results: dict[str, Any]) -> None:
+    status = ty_results.get("status")
+    if status == "warning":
+        msg = str(ty_results.get("error_message", "ty not found"))
+        _print_detail_block("Ty warning", msg, "yellow")
+        return
+    if status == "success":
+        return
+
+    output = str(ty_results.get("output", ""))
+    error_msg = str(ty_results.get("error_message", ""))
+    if output:
+        _print_detail_block("Ty issues found", output, "red")
+    elif error_msg:
+        _print_detail_block("Ty error", error_msg, "red")
+    else:
+        console.print("[red]Ty failed, but no standard output was captured.[/red]")
+
+
+def _print_radon_cc_result(radon_results: dict[str, Any]) -> None:
+    status = radon_results.get("status")
+    if status == "warning":
+        err_msg = str(radon_results.get("error_message", ""))
+        _print_detail_block("Radon CC warning", err_msg, "yellow")
+        return
+    if status != "failed":
+        return
+
+    issues = radon_results.get("issues", [])
+    if issues:
+        console.print(
+            f"[red]Cyclomatic Complexity too high "
+            f"({len(issues)} functions > 15):[/red]"
+        )
+        for issue in issues:
+            console.print(
+                f"  - {issue['file']}: {issue['type']} '{issue['name']}' "
+                f"has CC {issue['complexity']}"
+            )
+        console.print()
+        return
+
+    err_msg = str(radon_results.get("error_message", ""))
+    if err_msg:
+        _print_detail_block("Radon CC error", err_msg, "red")
+        return
+    console.print("[red]Radon CC failed but no specific issues were parsed.[/red]")
+    console.print()
+
+
+def _print_hard_failure_details(hard_results: dict[str, Any]) -> None:
+    console.print("[bold red]Hard Evaluation Failed![/bold red]")
+    console.print()
+
+    ruff_issues = hard_results.get("ruff", {}).get("issues", [])
+    if hard_results.get("ruff", {}).get("status") != "success":
+        _print_ruff_issues(ruff_issues)
+
+    if hard_results.get("mypy", {}).get("status") != "success":
+        output = str(hard_results.get("mypy", {}).get("output", ""))
+        _print_detail_block("Mypy issues found", output, "red")
+
+    _print_ty_result(hard_results.get("ty", {}))
+    _print_radon_cc_result(hard_results.get("radon_cc", {}))
+
+    if hard_results.get("pytest", {}).get("status") == "failed":
+        error_msg = str(hard_results.get("pytest", {}).get("error_message", ""))
+        _print_detail_block("Pytest/Coverage issues found", error_msg, "red")
+
+    console.print(
+        "[yellow]Continuing to soft evaluation to generate "
+        "suggestions despite hard failures...[/yellow]"
+    )
+
+
+def _print_hard_evaluation_summary(hard_results: dict[str, Any]) -> None:
+    if hard_results["all_passed"]:
+        console.print("[bold green]Hard Evaluation Passed![/bold green]")
+        return
+    _print_hard_failure_details(hard_results)
+
+
+def _print_mi_scorecard(hard_results: dict[str, Any]) -> None:
+    mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
+    if not mi_scores:
+        return
+
+    avg_mi = sum(mi_scores.values()) / len(mi_scores)
+    color = "green" if avg_mi > 50 else "yellow" if avg_mi > 20 else "red"
+    console.print(f"[{color}]Average Maintainability Index: {avg_mi:.1f}/100[/{color}]")
+
+
+def _print_qc_summary(qc_results: dict[str, Any]) -> None:
+    console.print()
+    console.print("[bold blue]Running Governance QC (Second Fence)...[/bold blue]")
+
+    if qc_results["all_passed"]:
+        console.print(
+            "[bold green]Governance QC Passed! (Change is admissible)[/bold green]"
+        )
+        console.print()
+        return
+
+    console.print("[bold red]Governance QC Failed![/bold red]")
+    console.print()
+    console.print(
+        "[red]The proposed changes violate governance constraints "
+        "or lack sufficient evidence.[/red]"
+    )
+    for failure in qc_results["failures"]:
+        console.print(f"[red]- {failure}[/red]")
+    console.print()
+    console.print(
+        "[yellow]Continuing to soft evaluation to generate "
+        "suggestions despite QC failures...[/yellow]"
+    )
+    console.print()
+
+
+def _print_soft_evaluation_start() -> None:
+    console.print(
+        "[bold blue]Running Soft Evaluation "
+        "(Readability & Understandability)...[/bold blue]"
+    )
+
+
+def _print_soft_summary(soft_results: dict[str, Any]) -> None:
+    pkg_summary = soft_results["package_summary"]
+    console.print(
+        f"[green]Analyzed {pkg_summary['total_files']} files with a total of "
+        f"{pkg_summary['total_tokens']} tokens.[/green]"
+    )
+    console.print(
+        f"[magenta]Agent's Understanding of the Package:[/magenta]\n"
+        f"{pkg_summary['package_understanding']}"
+    )
+
+    console.print()
+    console.print(
+        f"[cyan]Overall Understandability Score:[/cyan] "
+        f"{soft_results['understandability_score']:.1f}/100"
+    )
+
+    qa_results = soft_results.get("qa_results", {}).get("sampled_entities", [])
+    if qa_results:
+        console.print()
+        console.print("[bold yellow]Blind QA Sampling Results:[/bold yellow]")
+        for qa in qa_results:
+            color = "green" if qa["score"] >= 80 else "red"
+            console.print(f"  - [{color}]{qa['entity']}: Score {qa['score']}[/{color}]")
+            console.print(f"    [dim]Feedback: {qa['feedback']}[/dim]")
+
+    console.print()
+    console.print("[yellow]Evaluation completed. Generating report...[/yellow]")
+    console.print()
+
+
+def _print_final_report(final_report: dict[str, Any]) -> None:
+    verdict = str(final_report.get("verdict", "Unknown"))
+    verdict_color = "bold green" if "Pass" in verdict else "bold red"
+
+    console.print(
+        f"[{verdict_color}]=== FINAL VERDICT: {verdict} ===[/{verdict_color}]"
+    )
+    console.print(f"[bold]Summary:[/bold] {final_report.get('summary', '')}")
+    console.print()
+
+    suggestions = final_report.get("suggestions", [])
+    if suggestions:
+        console.print("[bold cyan]Top 3 Improvement Suggestions:[/bold cyan]")
+        for i, sug in enumerate(suggestions, 1):
+            console.print(
+                f"  {i}. [bold]{sug.get('title', 'Suggestion')}[/bold] "
+                f"(Target: [yellow]{sug.get('target_file', 'unknown')}[/yellow])"
+            )
+            console.print(f"     [dim]{sug.get('description', '')}[/dim]")
 
 
 @app.command()
@@ -43,7 +242,7 @@ def refine(
     hard_results = evaluator.hard_evaluator.evaluate()
     soft_results = evaluator.soft_evaluator.evaluate()
     baseline_report = evaluator.soft_evaluator.generate_final_report(
-        hard_results, soft_results
+        hard_results, {"all_passed": True, "failures": []}, soft_results
     )
     
     suggestions = baseline_report.get("suggestions", [])
@@ -86,167 +285,27 @@ def measure(path: str = typer.Argument(".", help="The path to evaluate")) -> Non
     )
     
     evaluator = Evaluator(path)
-    
-    # 1. Hard Evaluation Gate (First Fence)
     console.print("[bold blue]Running Hard Evaluation (ruff, mypy)...[/bold blue]")
     hard_results = evaluator.hard_evaluator.evaluate()
-    
-    if not hard_results["all_passed"]:
-        console.print("[bold red]Hard Evaluation Failed! Exiting.[/bold red]")
-        if hard_results["ruff"]["status"] != "success":
-            console.print("[red]Ruff issues found:[/red]")
-            # Assuming ruff output is JSON as configured in HardEvaluator
-            for issue in hard_results["ruff"].get("issues", []):
-                file = issue.get("filename", "unknown")
-                line = issue.get("location", {}).get("row", "?")
-                msg = issue.get("message", "unknown issue")
-                console.print(f"  - {file}:{line} {msg}")
-        if hard_results["mypy"]["status"] != "success":
-            output = hard_results["mypy"].get("output", "")
-            console.print(f"[red]Mypy issues found:[/red]\n{output}")
-        if hard_results["ty"]["status"] not in ("success", "warning"):
-            output = hard_results["ty"].get("output", "")
-            # ty might print to stderr instead of stdout, or it might be missing
-            error_msg = hard_results["ty"].get("error_message", "")
-            if output:
-                console.print(f"[red]Ty issues found:[/red]\n{output}")
-            elif error_msg:
-                console.print(f"[red]Ty error:[/red]\n{error_msg}")
-            else:
-                console.print(
-                    "[red]Ty failed, but no standard output was captured.[/red]"
-                )
-        elif hard_results["ty"]["status"] == "warning":
-            msg = hard_results["ty"].get("error_message", "ty not found")
-            console.print(f"[yellow]Ty warning:[/yellow] {msg}")
-        if hard_results["radon_cc"]["status"] != "success":
-            issues = hard_results["radon_cc"].get("issues", [])
-            console.print(
-                f"[red]Cyclomatic Complexity too high "
-                f"({len(issues)} functions > 15):[/red]"
-            )
-            for issue in issues:
-                console.print(
-                    f"  - {issue['file']}: {issue['type']} '{issue['name']}' "
-                    f"has CC {issue['complexity']}"
-                )
-            
-            # If radon failed for another reason 
-            # (e.g. radon not installed or syntax error)
-            if not issues and hard_results["radon_cc"].get("error_message"):
-                err_msg = hard_results['radon_cc'].get('error_message')
-                console.print(f"[red]Radon CC Error:[/red] {err_msg}")
-            elif not issues:
-                console.print(
-                    "[red]Radon CC failed but no specific issues were parsed.[/red]"
-                )
-        elif hard_results["radon_cc"]["status"] == "warning":
-            err_msg = hard_results['radon_cc'].get('error_message')
-            console.print(f"[yellow]Radon CC warning:[/yellow] {err_msg}")
-        
-        if hard_results.get("pytest", {}).get("status") == "failed":
-            error_msg = hard_results["pytest"].get("error_message", "Tests failed")
-            console.print(f"[red]Pytest/Coverage issues found:[/red] {error_msg}")
-        
-        # DO NOT sys.exit(1) here anymore!
-        # We want to generate the report even if it fails.
-        console.print(
-            "[yellow]Continuing to soft evaluation to generate "
-            "suggestions despite hard failures...[/yellow]"
-        )
-    else:
-        console.print("[bold green]Hard Evaluation Passed![/bold green]")
-    
-    # Print Maintainability Index scorecard
-    mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
-    if mi_scores:
-        avg_mi = sum(mi_scores.values()) / len(mi_scores)
-        color = "green" if avg_mi > 50 else "yellow" if avg_mi > 20 else "red"
-        console.print(
-            f"[{color}]Average Maintainability Index: {avg_mi:.1f}/100[/{color}]"
-        )
+    _print_hard_evaluation_summary(hard_results)
+    _print_mi_scorecard(hard_results)
 
-    # 2. Governance/QC Evaluation (Second Fence)
-    console.print("\n[bold blue]Running Governance QC (Second Fence)...[/bold blue]")
     qc_results = evaluator.qc_evaluator.evaluate()
-    
-    if not qc_results["all_passed"]:
-        console.print("[bold red]Governance QC Failed! Exiting.[/bold red]")
-        console.print(
-            "[red]The proposed changes violate governance constraints "
-            "or lack sufficient evidence.[/red]"
-        )
-        for failure in qc_results["failures"]:
-            console.print(f"[red]- {failure}[/red]")
-        # DO NOT sys.exit(1) here! We want to generate suggestions for QC failures too.
-        console.print(
-            "[yellow]Continuing to soft evaluation to generate "
-            "suggestions despite QC failures...[/yellow]"
-        )
-    else:
-        console.print(
-            "[bold green]Governance QC Passed! (Change is admissible)[/bold green]"
-        )
+    _print_qc_summary(qc_results)
 
-    # 3. Soft Evaluation/Readability (Third Fence)
-    console.print(
-        "[bold blue]Running Soft Evaluation "
-        "(Readability & Understandability)...[/bold blue]"
-    )
+    _print_soft_evaluation_start()
     soft_results = evaluator.soft_evaluator.evaluate()
+    _print_soft_summary(soft_results)
 
-    pkg_summary = soft_results["package_summary"]
-    console.print(
-        f"[green]Analyzed {pkg_summary['total_files']} files with a total of "
-        f"{pkg_summary['total_tokens']} tokens.[/green]"
-    )
-    console.print(
-        f"[magenta]Agent's Understanding of the Package:[/magenta]\n"
-        f"{pkg_summary['package_understanding']}"
-    )
-    
-    console.print(
-        f"\n[cyan]Overall Understandability Score:[/cyan] "
-        f"{soft_results['understandability_score']:.1f}/100"
-    )
-    
-    qa_results = soft_results.get("qa_results", {}).get("sampled_entities", [])
-    if qa_results:
-        console.print("\n[bold yellow]Blind QA Sampling Results:[/bold yellow]")
-        for qa in qa_results:
-            color = "green" if qa['score'] >= 80 else "red"
-            console.print(f"  - [{color}]{qa['entity']}: Score {qa['score']}[/{color}]")
-            console.print(f"    [dim]Feedback: {qa['feedback']}[/dim]")
-
-    console.print("\n[yellow]Evaluation completed. Generating report...[/yellow]\n")
-    
-    # Generate Final Report
-    # Pass all results to the reporter so it knows *why* things failed
     final_report = evaluator.soft_evaluator.generate_final_report(
         hard_results, qc_results, soft_results
     )
-    
-    if final_report:
-        verdict = final_report.get("verdict", "Unknown")
-        verdict_color = "bold green" if "Pass" in verdict else "bold red"
-        
-        console.print(
-            f"[{verdict_color}]=== FINAL VERDICT: {verdict} ===[/{verdict_color}]"
-        )
-        console.print(f"[bold]Summary:[/bold] {final_report.get('summary', '')}\n")
-        
-        suggestions = final_report.get("suggestions", [])
-        if suggestions:
-            console.print("[bold cyan]Top 3 Improvement Suggestions:[/bold cyan]")
-            for i, sug in enumerate(suggestions, 1):
-                console.print(
-                    f"  {i}. [bold]{sug.get('title', 'Suggestion')}[/bold] "
-                    f"(Target: [yellow]{sug.get('target_file', 'unknown')}[/yellow])"
-                )
-                console.print(f"     [dim]{sug.get('description', '')}[/dim]")
-        
-        if "Fail" in verdict:
-            sys.exit(1)
+    if not final_report:
+        return
+
+    _print_final_report(final_report)
+    if "Fail" in str(final_report.get("verdict", "Unknown")):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import tiktoken
 from openai import OpenAI
@@ -75,6 +75,235 @@ class SoftEvaluator:
                     python_files.append(Path(root) / file)
         return python_files
 
+    def _read_file_text(self, file_path: Path) -> str:
+        return file_path.read_text(encoding="utf-8")
+
+    def _count_tokens(self, content: str) -> int:
+        if not self.encoding:
+            return 0
+        return len(self.encoding.encode(content))
+
+    def _relative_file_path(self, file_path: Path) -> str:
+        try:
+            return str(file_path.relative_to(self.target_path))
+        except ValueError:
+            return str(file_path)
+
+    def _build_default_file_summary(
+        self,
+        file_path: Path,
+        tokens: int,
+    ) -> dict[str, Any]:
+        return {
+            "file": self._relative_file_path(file_path),
+            "tokens": tokens,
+            "summary": f"File {file_path.name} contains {tokens} tokens.",
+            "key_entities": [],
+        }
+
+    def _should_call_file_summary_llm(self, content: str, tokens: int) -> bool:
+        return bool(self.client and content and 0 < tokens < 100000)
+
+    def _build_file_summary_messages(
+        self,
+        file_path: Path,
+        content: str,
+    ) -> list[dict[str, str]]:
+        sys_prompt = (
+            "You are a senior Python architect. Analyze the provided Python "
+            "file and provide a concise summary of its purpose, a list of "
+            "its key entities (classes/functions/globals), and an estimated "
+            "cognitive complexity score (1-10).\n"
+            "Output MUST be in valid JSON matching this schema: "
+            '{"summary": "str", "key_entities": ["str"], "complexity_score": 1}'
+        )
+        return [
+            {"role": "system", "content": sys_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"File name: {file_path.name}\n\nContent:\n"
+                    f"```python\n{content}\n```"
+                ),
+            },
+        ]
+
+    def _parse_file_summary_response(
+        self,
+        raw_content: str,
+        fallback_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        parsed = FileSummary.model_validate_json(raw_content)
+        return {
+            "file": fallback_summary["file"],
+            "tokens": fallback_summary["tokens"],
+            "summary": parsed.summary,
+            "key_entities": parsed.key_entities,
+        }
+
+    def _summarize_file_with_llm(
+        self,
+        file_path: Path,
+        content: str,
+        fallback_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        client = cast(Any, self.client)
+        completion = client.chat.completions.create(
+            model=self.mini_model_name,
+            messages=self._build_file_summary_messages(file_path, content),
+            response_format={"type": "json_object"},
+        )
+        content_str = completion.choices[0].message.content
+        if not content_str:
+            return fallback_summary
+        return self._parse_file_summary_response(content_str, fallback_summary)
+
+    def _extract_metrics(
+        self,
+        hard_results: dict[str, Any],
+        qc_results: dict[str, Any],
+        soft_results: dict[str, Any],
+    ) -> dict[str, Any]:
+        cc_issues = hard_results.get("radon_cc", {}).get("issues", [])
+        mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
+        avg_mi = sum(mi_scores.values()) / len(mi_scores) if mi_scores else 100.0
+        return {
+            "cc_issues": cc_issues,
+            "avg_mi": avg_mi,
+            "hard_failed": not hard_results.get("all_passed", True),
+            "qc_failed": not qc_results.get("all_passed", True),
+            "qc_errors": qc_results.get("failures", []),
+            "qa_score": soft_results.get("understandability_score", 100.0),
+            "qa_entities": soft_results.get("qa_results", {}).get(
+                "sampled_entities", []
+            ),
+            "hard_errors": self._collect_hard_errors(hard_results),
+        }
+
+    def _collect_hard_errors(self, hard_results: dict[str, Any]) -> list[str]:
+        if hard_results.get("all_passed", True):
+            return []
+
+        hard_errors = []
+        if hard_results.get("ruff", {}).get("status") != "success":
+            hard_errors.append("Linter (Ruff) failed.")
+        if hard_results.get("mypy", {}).get("status") != "success":
+            hard_errors.append("Type checker (Mypy) failed.")
+        if hard_results.get("pytest", {}).get("status") != "success":
+            hard_errors.append(
+                hard_results.get("pytest", {}).get(
+                    "error_message", "Tests or Coverage failed."
+                )
+            )
+        return hard_errors
+
+    def _determine_verdict(self, metrics: dict[str, Any], mock: bool = False) -> str:
+        suffix = " (Mock)" if mock else ""
+        if metrics["hard_failed"] or metrics["qc_failed"]:
+            return f"Fail{suffix}"
+        passed = (
+            metrics["avg_mi"] > 50
+            and metrics["qa_score"] > 75
+            and not metrics["cc_issues"]
+        )
+        return f"Pass{suffix}" if passed else f"Fail{suffix}"
+
+    def _build_mock_summary(
+        self,
+        metrics: dict[str, Any],
+        hard_results: dict[str, Any],
+    ) -> str:
+        summary_parts = []
+        if metrics["hard_failed"]:
+            pytest_err = hard_results.get("pytest", {}).get("error_message", "")
+            summary_parts.append(f"Hard evaluation failed. {pytest_err}".strip())
+        if metrics["qc_failed"]:
+            summary_parts.append("Governance QC failed.")
+        if not summary_parts:
+            summary_parts.append("Mock evaluation completed without LLM.")
+        return " ".join(summary_parts)
+
+    def _build_mock_final_report(
+        self,
+        hard_results: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "verdict": self._determine_verdict(metrics, mock=True),
+            "summary": self._build_mock_summary(metrics, hard_results),
+            "suggestions": [
+                {
+                    "title": "Mock Suggestion 1",
+                    "description": "Add more docstrings.",
+                    "target_file": "all",
+                },
+                {
+                    "title": "Mock Suggestion 2",
+                    "description": "Refactor large functions.",
+                    "target_file": "all",
+                },
+                {
+                    "title": "Mock Suggestion 3",
+                    "description": "Improve test coverage.",
+                    "target_file": "tests/",
+                },
+            ],
+        }
+
+    def _build_final_report_messages(
+        self,
+        metrics: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        sys_prompt = (
+            "You are an elite Python Codebase Evaluator. You have just analyzed "
+            "a repository. Your task is to provide a final judgment and EXACTLY "
+            "3 concrete, actionable improvement suggestions.\n"
+            "If the codebase failed its Hard or QC evaluations (e.g. tests "
+            "failed, coverage is low, or governance violated), your suggestions "
+            "MUST prioritize fixing those issues.\n"
+            "Otherwise, focus on refactoring/quality improvements without "
+            "changing external functionality.\n\n"
+            "Output MUST be in valid JSON matching this schema:\n"
+            "{\n"
+            '  "verdict": "Pass" or "Fail",\n'
+            '  "summary": "One paragraph summary of codebase health and '
+            'any critical failures",\n'
+            '  "suggestions": [\n'
+            '    {"title": "str", "description": "str", "target_file": "str"}\n'
+            "  ]\n"
+            "}\n"
+            "Rule for Verdict: If there are Hard Failures or QC Failures, "
+            "verdict MUST be Fail. Otherwise, Pass if Average Maintainability "
+            "> 50 and QA Score > 75 and no Critical CC issues (>15). "
+            "Otherwise Fail."
+        )
+        user_content = (
+            f"Metrics:\n"
+            f"- Average Maintainability Index (MI): {metrics['avg_mi']:.1f}/100\n"
+            f"- Number of functions with Cyclomatic Complexity > 15: "
+            f"{len(metrics['cc_issues'])}\n"
+            f"- Agent QA Readability Score: {metrics['qa_score']:.1f}/100\n\n"
+            f"Failures (Prioritize these!):\n"
+            f"- Hard Evaluation Errors: "
+            f"{metrics['hard_errors'] if metrics['hard_errors'] else 'None'}\n"
+            f"- QC/Governance Errors: "
+            f"{metrics['qc_errors'] if metrics['qc_errors'] else 'None'}\n\n"
+            f"QA Feedback Snippets:\n"
+            + "\n".join(
+                [f"  * {q['entity']}: {q['feedback']}" for q in metrics["qa_entities"]]
+            )
+        )
+        return [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _parse_final_report_response(self, raw_content: str) -> dict[str, Any]:
+        parsed_json = json.loads(raw_content)
+        if isinstance(parsed_json, dict):
+            return parsed_json
+        raise ValueError("JSON response is not a dictionary.")
+
     def calculate_token_complexity(self, file_path: Path) -> int:
         """
         Calculate the token count for a given file as a proxy
@@ -84,8 +313,8 @@ class SoftEvaluator:
             return 0
 
         try:
-            content = file_path.read_text(encoding="utf-8")
-            return len(self.encoding.encode(content))
+            content = self._read_file_text(file_path)
+            return self._count_tokens(content)
         except Exception as e:
             console.print(
                 f"[yellow]Warning: Could not read {file_path} for token counting: "
@@ -151,59 +380,17 @@ class SoftEvaluator:
         except Exception:
             content = ""
 
-        simulated_summary = f"File {file_path.name} contains {tokens} tokens."
-        key_entities: list[str] = []
-
-        # Only call LLM if file is not empty and not too large (e.g. > 100k tokens)
-        if self.client and content and 0 < tokens < 100000:
-            try:
-                sys_prompt = (
-                    "You are a senior Python architect. Analyze the provided Python "
-                    "file and provide a concise summary of its purpose, a list of "
-                    "its key entities (classes/functions/globals), and an estimated "
-                    "cognitive complexity score (1-10).\n"
-                    "Output MUST be in valid JSON matching this schema: "
-                    '{"summary": "str", "key_entities": ["str"], "complexity_score": 1}'
-                )
-                completion = self.client.chat.completions.create(
-                    model=self.mini_model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": sys_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"File name: {file_path.name}\n\nContent:\n"
-                                f"```python\n{content}\n```"
-                            ),
-                        },
-                    ],
-                    response_format={"type": "json_object"},
-                )
-
-                content_str = completion.choices[0].message.content
-                if content_str:
-                    result = json.loads(content_str)
-                    simulated_summary = result.get("summary", simulated_summary)
-                    key_entities = result.get("key_entities", key_entities)
-            except Exception as e:
-                console.print(
-                    f"[yellow]  Agent failed to read {file_path.name}: {e}[/yellow]"
-                )
+        fallback_summary = self._build_default_file_summary(file_path, tokens)
+        if not self._should_call_file_summary_llm(content, tokens):
+            return fallback_summary
 
         try:
-            rel_path = str(file_path.relative_to(self.target_path))
-        except ValueError:
-            rel_path = str(file_path)
-
-        return {
-            "file": rel_path,
-            "tokens": tokens,
-            "summary": simulated_summary,
-            "key_entities": key_entities,
-        }
+            return self._summarize_file_with_llm(file_path, content, fallback_summary)
+        except Exception as e:
+            console.print(
+                f"[yellow]  Agent failed to read {file_path.name}: {e}[/yellow]"
+            )
+            return fallback_summary
 
     def summarize_package(self) -> dict[str, Any]:
         """
@@ -382,114 +569,22 @@ class SoftEvaluator:
         Synthesize all evaluation results into a final verdict and exactly 
         3 actionable suggestions.
         """
+        metrics = self._extract_metrics(hard_results, qc_results, soft_results)
         if not self.client:
-            return {
-                "verdict": "Pass (Mock)",
-                "summary": "Mock evaluation completed without LLM.",
-                "suggestions": [
-                    {
-                        "title": "Mock Suggestion 1",
-                        "description": "Add more docstrings.",
-                        "target_file": "all"
-                    },
-                    {
-                        "title": "Mock Suggestion 2",
-                        "description": "Refactor large functions.",
-                        "target_file": "all"
-                    },
-                    {
-                        "title": "Mock Suggestion 3",
-                        "description": "Improve test coverage.",
-                        "target_file": "tests/"
-                    }
-                ]
-            }
+            return self._build_mock_final_report(hard_results, metrics)
 
         try:
-            # Extract key metrics for the prompt
-            cc_issues = hard_results.get("radon_cc", {}).get("issues", [])
-            mi_scores = hard_results.get("radon_mi", {}).get("mi_scores", {})
-            avg_mi = sum(mi_scores.values()) / len(mi_scores) if mi_scores else 100.0
-            
-            # Extract failures
-            hard_failed = not hard_results.get("all_passed", True)
-            
-            hard_errors = []
-            if hard_failed:
-                if hard_results.get("ruff", {}).get("status") != "success":
-                    hard_errors.append("Linter (Ruff) failed.")
-                if hard_results.get("mypy", {}).get("status") != "success":
-                    hard_errors.append("Type checker (Mypy) failed.")
-                if hard_results.get("pytest", {}).get("status") != "success":
-                    pytest_err = hard_results.get("pytest", {}).get(
-                        "error_message", "Tests or Coverage failed."
-                    )
-                    hard_errors.append(pytest_err)
-            
-            qc_errors = qc_results.get("failures", [])
-            
-            qa_score = soft_results.get("understandability_score", 100.0)
-            qa_entities = soft_results.get("qa_results", {}).get("sampled_entities", [])
-            
-            sys_prompt = (
-                "You are an elite Python Codebase Evaluator. You have just analyzed "
-                "a repository. Your task is to provide a final judgment and EXACTLY "
-                "3 concrete, actionable improvement suggestions.\n"
-                "If the codebase failed its Hard or QC evaluations (e.g. tests "
-                "failed, coverage is low, or governance violated), your suggestions "
-                "MUST prioritize fixing those issues.\n"
-                "Otherwise, focus on refactoring/quality improvements without "
-                "changing external functionality.\n\n"
-                "Output MUST be in valid JSON matching this schema:\n"
-                "{\n"
-                '  "verdict": "Pass" or "Fail",\n'
-                '  "summary": "One paragraph summary of codebase health and '
-                'any critical failures",\n'
-                '  "suggestions": [\n'
-                '    {"title": "str", "description": "str", "target_file": "str"}\n'
-                "  ]\n"
-                "}\n"
-                "Rule for Verdict: If there are Hard Failures or QC Failures, "
-                "verdict MUST be Fail. Otherwise, Pass if Average Maintainability "
-                "> 50 and QA Score > 75 and no Critical CC issues (>15). "
-                "Otherwise Fail."
-            )
-
-            user_content = (
-                f"Metrics:\n"
-                f"- Average Maintainability Index (MI): {avg_mi:.1f}/100\n"
-                f"- Number of functions with Cyclomatic Complexity > 15: "
-                f"{len(cc_issues)}\n"
-                f"- Agent QA Readability Score: {qa_score:.1f}/100\n\n"
-                f"Failures (Prioritize these!):\n"
-                f"- Hard Evaluation Errors: "
-                f"{hard_errors if hard_errors else 'None'}\n"
-                f"- QC/Governance Errors: "
-                f"{qc_errors if qc_errors else 'None'}\n\n"
-                f"QA Feedback Snippets:\n"
-                + "\n".join(
-                    [f"  * {q['entity']}: {q['feedback']}" for q in qa_entities]
-                )
-            )
-
-            completion = self.client.chat.completions.create(
+            client = cast(Any, self.client)
+            completion = client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_content},
-                ],
+                messages=self._build_final_report_messages(metrics),
                 response_format={"type": "json_object"},
             )
 
             content_str = completion.choices[0].message.content
             if content_str:
-                parsed_json = json.loads(content_str)
-                if isinstance(parsed_json, dict):
-                    return parsed_json
-                else:
-                    raise ValueError("JSON response is not a dictionary.")
-            else:
-                raise ValueError("Empty response from Agent.")
+                return self._parse_final_report_response(content_str)
+            raise ValueError("Empty response from Agent.")
         except Exception as e:
             console.print(f"[yellow]Failed to generate final report: {e}[/yellow]")
             return {

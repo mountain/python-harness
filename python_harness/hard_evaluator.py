@@ -2,15 +2,17 @@
 Core module for integrating hard evaluation tools like ruff, mypy, and pytest.
 """
 
-import sys
 import json
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 
 console = Console()
+PYTEST_TIMEOUT_SECONDS = 60
 
 class HardEvaluator:
     """
@@ -26,7 +28,15 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "ruff", "check", str(self.target_path), "--output-format", "json"],
+                [
+                    sys.executable,
+                    "-m",
+                    "ruff",
+                    "check",
+                    str(self.target_path),
+                    "--output-format",
+                    "json",
+                ],
                 capture_output=True,
                 text=True,
                 check=False
@@ -102,7 +112,15 @@ class HardEvaluator:
         """
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "radon", "cc", "-j", "-a", str(self.target_path)],
+                [
+                    sys.executable,
+                    "-m",
+                    "radon",
+                    "cc",
+                    "-j",
+                    "-a",
+                    str(self.target_path),
+                ],
                 capture_output=True,
                 text=True,
                 check=False
@@ -197,22 +215,44 @@ class HardEvaluator:
         Run Pytest test suite and return coverage results.
         """
         try:
-            # When pytest is run within pytest, it can cause issues or hang.
-            # Here we just run it as a subprocess to gather results.
-            result = subprocess.run(
-                [sys.executable, "-m", "pytest", str(self.target_path), "--cov", "--cov-report=json"],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                coverage_report = Path(tmp_dir) / "coverage.json"
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        str(self.target_path),
+                        "--cov",
+                        f"--cov-report=json:{coverage_report}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=PYTEST_TIMEOUT_SECONDS,
+                )
+                coverage_percentage = None
+                if coverage_report.exists():
+                    coverage_data = json.loads(coverage_report.read_text())
+                    coverage_percentage = coverage_data.get("totals", {}).get(
+                        "percent_covered"
+                    )
             status = "success" if result.returncode == 0 else "failed"
             return {
                 "status": status,
                 "output": result.stdout,
                 "return_code": result.returncode,
+                "coverage_percentage": coverage_percentage,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "failed",
+                "error_message": (
+                    f"Pytest run timed out after {PYTEST_TIMEOUT_SECONDS} seconds."
+                ),
             }
         except Exception as e:
-             return {"status": "error", "error_message": str(e)}
+            return {"status": "error", "error_message": str(e)}
 
     def evaluate(self) -> dict[str, Any]:
         """
@@ -227,19 +267,20 @@ class HardEvaluator:
         pytest_res = self.run_pytest()
         
         # Parse pytest coverage to check if it's < 90%
-        cov_percentage = 0.0
-        if pytest_res.get("status") == "success" and pytest_res.get("output"):
-            try:
-                cov_data = json.loads(pytest_res["output"])
-                cov_percentage = cov_data.get("totals", {}).get("percent_covered", 0.0)
+        cov_percentage = pytest_res.get("coverage_percentage")
+        if pytest_res.get("status") == "success":
+            if isinstance(cov_percentage, (int, float)):
                 if cov_percentage < 90.0:
                     pytest_res["status"] = "failed"
                     pytest_res["error_message"] = (
                         f"Test coverage is {cov_percentage:.2f}%, "
                         f"which is below the 90% threshold."
                     )
-            except Exception:
-                pass
+            else:
+                pytest_res["status"] = "failed"
+                pytest_res["error_message"] = (
+                    "Coverage report was missing or unreadable."
+                )
 
         all_passed = (
             ruff_res.get("status") == "success" and 
