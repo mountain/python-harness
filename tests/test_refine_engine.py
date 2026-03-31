@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from python_harness import refine_engine
+from python_harness import refine_checks
 from python_harness.refine_apply import NullSuggestionApplier
 from python_harness.refine_engine import execute_candidate, run_refine, run_refine_round
 from python_harness.refine_models import Candidate
@@ -100,7 +100,7 @@ def test_execute_candidate_with_default_self_check_does_not_measure_failed_candi
         measured.append(workspace.name)
         return {"final_report": {"verdict": "Fail", "suggestions": []}}
 
-    monkeypatch.setattr("python_harness.refine_engine.subprocess.run", fake_run)
+    monkeypatch.setattr("python_harness.refine_checks.subprocess.run", fake_run)
 
     candidate = execute_candidate(
         parent=baseline,
@@ -108,7 +108,7 @@ def test_execute_candidate_with_default_self_check_does_not_measure_failed_candi
         suggestion={"title": "Fix tests", "description": "d"},
         workspace_root=tmp_path / "runs",
         applier=NullSuggestionApplier(),
-        self_check_runner=refine_engine._default_self_check_runner,
+        self_check_runner=refine_checks.default_self_check_runner,
         evaluator_runner=evaluator,
         max_retries=0,
     )
@@ -144,9 +144,9 @@ def test_default_self_check_runner_uses_target_path_in_all_commands(
         calls.append((args, cwd))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("python_harness.refine_engine.subprocess.run", fake_run)
+    monkeypatch.setattr("python_harness.refine_checks.subprocess.run", fake_run)
 
-    ok, output = refine_engine._default_self_check_runner(workspace)
+    ok, output = refine_checks.default_self_check_runner(workspace)
 
     assert ok is True
     assert output == ""
