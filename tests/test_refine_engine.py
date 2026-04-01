@@ -28,6 +28,17 @@ class FlakyApplier:
         }
 
 
+class StaticSuccessApplier:
+    def apply(
+        self,
+        workspace: Path,
+        suggestion: dict[str, str],
+        failure_feedback: str = "",
+    ) -> dict[str, object]:
+        del workspace, suggestion, failure_feedback
+        return {"ok": True, "touched_files": [], "failure_reason": ""}
+
+
 def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> None:
     baseline = Candidate(
         id="baseline",
@@ -313,7 +324,7 @@ def test_run_refine_round_creates_three_first_layer_and_nine_second_layer(
         target_path=target,
         workspace_root=tmp_path / "runs",
         evaluator_runner=evaluator,
-        applier=NullSuggestionApplier(),
+        applier=StaticSuccessApplier(),
         self_check_runner=lambda _: (True, ""),
         max_retries=0,
     )
@@ -327,6 +338,46 @@ def test_run_refine_round_creates_three_first_layer_and_nine_second_layer(
     ]
     assert len(first_layer) == 3
     assert len(second_layer) == 9
+
+
+def test_run_refine_round_stops_early_without_real_suggestion_applier(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "baseline"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+    calls = {"count": 0}
+
+    def evaluator(_: Path) -> dict[str, object]:
+        calls["count"] += 1
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 80.0},
+            "final_report": {
+                "verdict": "Fail",
+                "suggestions": [
+                    {"title": "S1", "description": "d1"},
+                    {"title": "S2", "description": "d2"},
+                    {"title": "S3", "description": "d3"},
+                ],
+            },
+        }
+
+    result = run_refine_round(
+        target_path=target,
+        workspace_root=tmp_path / "runs",
+        evaluator_runner=evaluator,
+        applier=NullSuggestionApplier(),
+        self_check_runner=lambda _: (True, ""),
+        max_retries=0,
+    )
+
+    assert calls["count"] == 1
+    assert result.winner is not None
+    assert result.winner.id == "baseline"
+    assert result.candidates == []
+    assert result.stop_reason == "no suggestion applier configured"
 
 
 def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> None:
@@ -377,7 +428,7 @@ def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> Non
         target_path=target,
         workspace_root=tmp_path / "runs",
         evaluator_runner=evaluator,
-        applier=NullSuggestionApplier(),
+        applier=StaticSuccessApplier(),
         self_check_runner=lambda _: (True, ""),
         max_retries=0,
     )
@@ -424,6 +475,41 @@ def test_run_refine_stops_when_winner_has_no_suggestions(tmp_path: Path) -> None
     assert result["rounds_completed"] == 1
     assert result["winner_id"] == "baseline"
     assert result["stop_reason"] == "winner has no suggestions"
+
+
+def test_run_refine_stops_early_without_real_suggestion_applier(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+
+    def evaluator(_: Path) -> dict[str, object]:
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 80.0},
+            "final_report": {
+                "verdict": "Fail",
+                "suggestions": [
+                    {"title": "S1", "description": "d1"},
+                    {"title": "S2", "description": "d2"},
+                    {"title": "S3", "description": "d3"},
+                ],
+            },
+        }
+
+    result = run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=True,
+        max_rounds=3,
+        evaluator_runner=evaluator,
+    )
+
+    assert result["rounds_completed"] == 1
+    assert result["winner_id"] == "baseline"
+    assert result["stop_reason"] == "no suggestion applier configured"
 
 
 def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(

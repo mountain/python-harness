@@ -62,6 +62,14 @@ def run_refine_round(
         status="measured",
     )
     round_result = RefineRoundResult(baseline=baseline)
+    if (
+        isinstance(applier, NullSuggestionApplier)
+        and suggestions_from(baseline.evaluation)
+    ):
+        round_result.winner = baseline
+        round_result.stop_reason = "no suggestion applier configured"
+        return round_result
+
     first_layer: list[Candidate] = []
 
     for index, suggestion in enumerate(suggestions_from(baseline.evaluation), start=1):
@@ -148,6 +156,10 @@ def run_refine(
         baseline_rank = build_candidate_rank(round_result.baseline)
         winner_rank = build_candidate_rank(winner)
         suggestions = suggestions_from(winner.evaluation)
+
+        if round_result.stop_reason == "no suggestion applier configured":
+            stop_reason = round_result.stop_reason
+            break
 
         if winner.workspace != target_path:
             adopt_candidate_workspace(winner.workspace, target_path)
