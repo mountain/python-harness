@@ -11,7 +11,11 @@ from python_harness.refine_models import (
     RefineRoundResult,
     SuggestionApplier,
 )
-from python_harness.refine_scoring import build_candidate_rank, select_best_candidate
+from python_harness.refine_scoring import (
+    build_candidate_rank,
+    candidate_metrics,
+    select_best_candidate,
+)
 from python_harness.refine_workspace import adopt_candidate_workspace
 from python_harness.soft_evaluator import SoftEvaluator
 
@@ -19,6 +23,35 @@ from python_harness.soft_evaluator import SoftEvaluator
 def _emit(progress_callback: Any, message: str) -> None:
     if progress_callback is not None:
         progress_callback(message)
+
+
+def _candidate_verdict(candidate: Candidate) -> str:
+    evaluation = candidate.evaluation or {}
+    final_report = evaluation.get("final_report", {})
+    if isinstance(final_report, dict):
+        return str(final_report.get("verdict", "n/a"))
+    return "n/a"
+
+
+def _scorecard_line(candidate: Candidate) -> str:
+    metrics = candidate_metrics(candidate)
+    hard = "fail" if metrics["hard_failed"] else "pass"
+    qc = "fail" if metrics["qc_failed"] else "pass"
+    return (
+        f"{candidate.id} | status={candidate.status} | hard={hard} | qc={qc} | "
+        f"mi={metrics['avg_mi']:.1f} | qa={metrics['qa_score']:.1f} | "
+        f"cc={metrics['cc_issue_count']} | verdict={_candidate_verdict(candidate)}"
+    )
+
+
+def _winner_reason(winner: Candidate, baseline: Candidate) -> str:
+    winner_rank = build_candidate_rank(winner)
+    baseline_rank = build_candidate_rank(baseline)
+    if winner.id == baseline.id:
+        return f"{winner.id} remains best because no candidate beat baseline"
+    return (
+        f"{winner.id} beats baseline with rank {winner_rank} over {baseline_rank}"
+    )
 
 
 def default_evaluator_runner(
@@ -105,6 +138,12 @@ def run_refine_round(
             )
         return dict(evaluator_runner(path))
 
+    def evaluate_candidate(path: Path, label: str) -> dict[str, Any]:
+        _emit(progress_callback, f"{label} guardrail 2 measure started")
+        result = dict(evaluator_runner(path))
+        _emit(progress_callback, f"{label} guardrail 2 completed")
+        return result
+
     _emit(progress_callback, "baseline measure started")
     baseline = Candidate(
         id="baseline",
@@ -126,21 +165,40 @@ def run_refine_round(
         return round_result
 
     first_layer: list[Candidate] = []
+    completed_candidates = 0
+    discovered_candidates = len(suggestions_from(baseline.evaluation))
 
     for index, suggestion in enumerate(suggestions_from(baseline.evaluation), start=1):
+        candidate_id = f"l1-{index}"
+        _emit(
+            progress_callback,
+            f"candidate {completed_candidates + 1}/{discovered_candidates} started: "
+            f"{candidate_id}",
+        )
         candidate = execute_candidate(
             parent=baseline,
-            candidate_id=f"l1-{index}",
+            candidate_id=candidate_id,
             suggestion=suggestion,
             workspace_root=workspace_root,
             applier=applier,
             self_check_runner=self_check_runner,
-            evaluator_runner=evaluator_runner,
+            evaluator_runner=lambda path, label=f"l1-{index}": evaluate_candidate(
+                path,
+                label,
+            ),
             max_retries=max_retries,
             progress_callback=progress_callback,
         )
+        completed_candidates += 1
+        _emit(
+            progress_callback,
+            f"candidate {completed_candidates}/{discovered_candidates} completed: "
+            f"{candidate.id} ({candidate.status})",
+        )
         round_result.candidates.append(candidate)
         first_layer.append(candidate)
+        if candidate.status == "measured" and candidate.evaluation:
+            discovered_candidates += len(suggestions_from(candidate.evaluation))
 
     for parent in first_layer:
         if parent.status != "measured" or not parent.evaluation:
@@ -149,16 +207,33 @@ def run_refine_round(
             suggestions_from(parent.evaluation),
             start=1,
         ):
+            candidate_id = f"{parent.id}-l2-{index}"
+            _emit(
+                progress_callback,
+                (
+                    "candidate "
+                    f"{completed_candidates + 1}/{discovered_candidates} "
+                    f"started: {candidate_id}"
+                ),
+            )
             candidate = execute_candidate(
                 parent=parent,
-                candidate_id=f"{parent.id}-l2-{index}",
+                candidate_id=candidate_id,
                 suggestion=suggestion,
                 workspace_root=workspace_root,
                 applier=applier,
                 self_check_runner=self_check_runner,
-                evaluator_runner=evaluator_runner,
+                evaluator_runner=lambda path, label=f"{parent.id}-l2-{index}": (
+                    evaluate_candidate(path, label)
+                ),
                 max_retries=max_retries,
                 progress_callback=progress_callback,
+            )
+            completed_candidates += 1
+            _emit(
+                progress_callback,
+                f"candidate {completed_candidates}/{discovered_candidates} completed: "
+                f"{candidate.id} ({candidate.status})",
             )
             round_result.candidates.append(candidate)
 
@@ -217,6 +292,19 @@ def run_refine(
         rounds_completed += 1
         winner = round_result.winner or round_result.baseline
         winner_id = winner.id
+        _emit(
+            progress_callback,
+            f"round {rounds_completed} selection winner: "
+            f"{winner_id} ({round_result.stop_reason})",
+        )
+        _emit(progress_callback, f"round {rounds_completed} scorecard:")
+        for candidate in [round_result.baseline, *round_result.candidates]:
+            _emit(progress_callback, _scorecard_line(candidate))
+        _emit(
+            progress_callback,
+            f"round {rounds_completed} winner reason: "
+            f"{_winner_reason(winner, round_result.baseline)}",
+        )
 
         baseline_rank = build_candidate_rank(round_result.baseline)
         winner_rank = build_candidate_rank(winner)
@@ -229,6 +317,10 @@ def run_refine(
 
         if winner.workspace != target_path:
             adopt_candidate_workspace(winner.workspace, target_path)
+            _emit(
+                progress_callback,
+                f"round {rounds_completed} adopted winner workspace: {winner.id}",
+            )
 
         if not loop:
             stop_reason = "single round completed"

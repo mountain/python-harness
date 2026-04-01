@@ -321,10 +321,18 @@ class SoftEvaluator:
             f"for cognitive load and architecture...[/cyan]"
         )
 
-        for file in files:
+        for index, file in enumerate(files, start=1):
+            console.print(
+                f"[dim]File summary {index}/{len(files)} started: "
+                f"{file.name}[/dim]"
+            )
             summary_data = self.summarize_file(file)
             file_summaries.append(summary_data)
             total_tokens += summary_data["tokens"]
+            console.print(
+                f"[dim]File summary {index}/{len(files)} completed: "
+                f"{file.name}[/dim]"
+            )
 
         # Synthesize package architecture
         package_understanding = (
@@ -504,7 +512,7 @@ class SoftEvaluator:
             console.print("[dim]Final report synthesis started[/dim]")
             completion = self._create_completion(
                 client,
-                model=self.model_name,
+                model=self.mini_model_name,
                 messages=self._build_final_report_messages(metrics),
                 response_format={"type": "json_object"},
             )

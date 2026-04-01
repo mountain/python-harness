@@ -205,6 +205,25 @@ def test_generate_final_report_emits_progress_messages(
     assert report["verdict"] == "Pass"
     assert any("Final report synthesis started" in message for message in messages)
     assert any("Final report synthesis completed" in message for message in messages)
+    calls = evaluator.client.chat.completions.calls
+    assert len(calls) == 1
+    assert calls[0]["model"] == evaluator.mini_model_name
+
+
+def test_summarize_package_emits_file_level_progress(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    messages: list[str] = []
+    sample = tmp_path / "module.py"
+    sample.write_text("def value() -> int:\n    return 1\n")
+    evaluator = SoftEvaluator(str(tmp_path))
+    monkeypatch.setattr("python_harness.soft_evaluator.console.print", messages.append)
+
+    evaluator.summarize_package()
+
+    assert any("File summary 1/1 started" in message for message in messages)
+    assert any("File summary 1/1 completed" in message for message in messages)
 
 
 def test_determine_verdict_fails_below_mi_70(tmp_path: Path) -> None:

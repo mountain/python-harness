@@ -784,6 +784,99 @@ def test_run_refine_emits_failure_detail_for_guardrail_failure(tmp_path: Path) -
     assert any("ruff failed" in message for message in messages)
 
 
+def test_run_refine_emits_candidate_measure_and_selection_logs(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+    messages: list[str] = []
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        if workspace == target:
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 70.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": "Winner", "description": "Apply better layout"},
+                    ],
+                },
+                "metrics": {
+                    "avg_mi": 60.0,
+                    "qa_score": 70.0,
+                    "cc_issue_count": 1,
+                    "hard_failed": False,
+                    "qc_failed": False,
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 95.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+            "metrics": {
+                "avg_mi": 90.0,
+                "qa_score": 95.0,
+                "cc_issue_count": 0,
+                "hard_failed": False,
+                "qc_failed": False,
+            },
+        }
+
+    class StaticApplier:
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del failure_feedback
+            (workspace / "sample.py").write_text(f"{suggestion['title']}\n")
+            return {"ok": True, "touched_files": ["sample.py"], "failure_reason": ""}
+
+    run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        evaluator_runner=evaluator,
+        applier=StaticApplier(),
+        self_check_runner=lambda _: (True, ""),
+        progress_callback=messages.append,
+    )
+
+    assert any("candidate 1/1 started: l1-1" in message for message in messages)
+    assert any(
+        "candidate 1/1 completed: l1-1 (measured)" in message
+        for message in messages
+    )
+    assert any("l1-1 guardrail 2 completed" in message for message in messages)
+    assert any("round 1 selection winner: l1-1" in message for message in messages)
+    assert any(
+        "round 1 adopted winner workspace: l1-1" in message
+        for message in messages
+    )
+    assert any("round 1 scorecard:" in message for message in messages)
+    assert any(
+        "baseline | status=measured | hard=pass | qc=pass | mi=60.0 | qa=70.0"
+        in message
+        for message in messages
+    )
+    assert any(
+        "l1-1 | status=measured | hard=pass | qc=pass | mi=90.0 | qa=95.0"
+        in message
+        for message in messages
+    )
+    assert any(
+        "round 1 winner reason: l1-1 beats baseline"
+        in message
+        for message in messages
+    )
+
+
 def test_run_refine_emits_baseline_guardrail_logs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
