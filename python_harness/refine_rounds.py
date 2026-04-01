@@ -3,8 +3,12 @@ from typing import Any
 
 from python_harness.hard_evaluator import HardEvaluator
 from python_harness.llm_client import load_llm_settings
+from python_harness.python_file_inventory import collect_python_files
 from python_harness.qc_evaluator import QCEvaluator
-from python_harness.refine_apply import LLMSuggestionApplier, NullSuggestionApplier
+from python_harness.refine_apply import (
+    LLMSuggestionApplier,
+    NullSuggestionApplier,
+)
 from python_harness.refine_execution import execute_candidate
 from python_harness.refine_models import (
     Candidate,
@@ -14,6 +18,7 @@ from python_harness.refine_models import (
 from python_harness.refine_scoring import (
     build_candidate_rank,
     candidate_metrics,
+    candidate_verdict,
     select_best_candidate,
 )
 from python_harness.refine_workspace import adopt_candidate_workspace
@@ -26,11 +31,33 @@ def _emit(progress_callback: Any, message: str) -> None:
 
 
 def _candidate_verdict(candidate: Candidate) -> str:
+    return candidate_verdict(candidate)
+
+
+def _candidate_total_tokens(candidate: Candidate) -> int:
     evaluation = candidate.evaluation or {}
-    final_report = evaluation.get("final_report", {})
-    if isinstance(final_report, dict):
-        return str(final_report.get("verdict", "n/a"))
-    return "n/a"
+    soft_evaluation = evaluation.get("soft_evaluation", {})
+    if not isinstance(soft_evaluation, dict):
+        return 0
+    package_summary = soft_evaluation.get("package_summary", {})
+    if not isinstance(package_summary, dict):
+        return 0
+    return int(package_summary.get("total_tokens", 0))
+
+
+def _candidate_readability(candidate: Candidate) -> float:
+    evaluation = candidate.evaluation or {}
+    soft_evaluation = evaluation.get("soft_evaluation", {})
+    if not isinstance(soft_evaluation, dict):
+        return 0.0
+    return float(soft_evaluation.get("understandability_score", 0.0))
+
+
+def _candidate_loc(candidate: Candidate) -> int:
+    total_lines = 0
+    for file_path in collect_python_files(candidate.workspace):
+        total_lines += len(file_path.read_text(encoding="utf-8").splitlines())
+    return total_lines
 
 
 def _scorecard_line(candidate: Candidate) -> str:
@@ -38,8 +65,12 @@ def _scorecard_line(candidate: Candidate) -> str:
     hard = "fail" if metrics["hard_failed"] else "pass"
     qc = "fail" if metrics["qc_failed"] else "pass"
     return (
-        f"{candidate.id} | status={candidate.status} | hard={hard} | qc={qc} | "
-        f"mi={metrics['avg_mi']:.1f} | qa={metrics['qa_score']:.1f} | "
+        f"{candidate.id} | status={candidate.status} | "
+        f"loc={_candidate_loc(candidate)} | "
+        f"tokens={_candidate_total_tokens(candidate)} | "
+        f"readability={_candidate_readability(candidate):.1f} | "
+        f"hard={hard} | qc={qc} | mi={metrics['avg_mi']:.1f} | "
+        f"qa={metrics['qa_score']:.1f} | "
         f"cc={metrics['cc_issue_count']} | verdict={_candidate_verdict(candidate)}"
     )
 

@@ -47,6 +47,17 @@ def candidate_metrics(candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def candidate_verdict(candidate: Candidate) -> str:
+    metrics = candidate_metrics(candidate)
+    if metrics["hard_failed"] or metrics["qc_failed"]:
+        return "Fail"
+    evaluation = candidate.evaluation or {}
+    final_report = evaluation.get("final_report", {})
+    if isinstance(final_report, dict):
+        return str(final_report.get("verdict", "Fail")).strip()
+    return "Fail"
+
+
 def build_candidate_rank(
     candidate: Candidate,
 ) -> tuple[int, int, int, float, float, int]:
@@ -56,9 +67,7 @@ def build_candidate_rank(
         "failed": 0,
     }
     metrics = candidate_metrics(candidate)
-    verdict = str(
-        (candidate.evaluation or {}).get("final_report", {}).get("verdict", "Fail")
-    ).strip()
+    verdict = candidate_verdict(candidate)
     normalized_status = _normalized_status(candidate)
     passes_hard_qc = int(not metrics["hard_failed"] and not metrics["qc_failed"])
     verdict_is_pass = int(verdict.startswith("Pass"))

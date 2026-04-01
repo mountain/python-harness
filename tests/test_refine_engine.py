@@ -606,7 +606,10 @@ def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
             return {
                 "hard_evaluation": {"all_passed": True},
                 "qc_evaluation": {"all_passed": True, "failures": []},
-                "soft_evaluation": {"understandability_score": 70.0},
+                "soft_evaluation": {
+                    "understandability_score": 70.0,
+                    "package_summary": {"total_tokens": 11},
+                },
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
@@ -700,7 +703,10 @@ def test_run_refine_emits_guardrail_stage_logs(tmp_path: Path) -> None:
             return {
                 "hard_evaluation": {"all_passed": True},
                 "qc_evaluation": {"all_passed": True, "failures": []},
-                "soft_evaluation": {"understandability_score": 70.0},
+                "soft_evaluation": {
+                    "understandability_score": 70.0,
+                    "package_summary": {"total_tokens": 11},
+                },
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
@@ -797,7 +803,10 @@ def test_run_refine_emits_candidate_measure_and_selection_logs(
             return {
                 "hard_evaluation": {"all_passed": True},
                 "qc_evaluation": {"all_passed": True, "failures": []},
-                "soft_evaluation": {"understandability_score": 70.0},
+                "soft_evaluation": {
+                    "understandability_score": 70.0,
+                    "package_summary": {"total_tokens": 11},
+                },
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
@@ -815,7 +824,10 @@ def test_run_refine_emits_candidate_measure_and_selection_logs(
         return {
             "hard_evaluation": {"all_passed": True},
             "qc_evaluation": {"all_passed": True, "failures": []},
-            "soft_evaluation": {"understandability_score": 95.0},
+            "soft_evaluation": {
+                "understandability_score": 95.0,
+                "package_summary": {"total_tokens": 22},
+            },
             "final_report": {"verdict": "Pass", "suggestions": []},
             "metrics": {
                 "avg_mi": 90.0,
@@ -861,12 +873,14 @@ def test_run_refine_emits_candidate_measure_and_selection_logs(
     )
     assert any("round 1 scorecard:" in message for message in messages)
     assert any(
-        "baseline | status=measured | hard=pass | qc=pass | mi=60.0 | qa=70.0"
+        "baseline | status=measured | loc=1 | tokens=11 | "
+        "readability=70.0 | hard=pass | qc=pass | mi=60.0 | qa=70.0"
         in message
         for message in messages
     )
     assert any(
-        "l1-1 | status=measured | hard=pass | qc=pass | mi=90.0 | qa=95.0"
+        "l1-1 | status=measured | loc=1 | tokens=22 | "
+        "readability=95.0 | hard=pass | qc=pass | mi=90.0 | qa=95.0"
         in message
         for message in messages
     )

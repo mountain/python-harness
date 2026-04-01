@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from python_harness.refine_models import Candidate
-from python_harness.refine_scoring import build_candidate_rank, select_best_candidate
+from python_harness.refine_scoring import (
+    build_candidate_rank,
+    candidate_verdict,
+    select_best_candidate,
+)
 
 
 def make_candidate(
@@ -157,3 +161,17 @@ def test_build_candidate_rank_treats_pass_mock_as_pass() -> None:
     )
 
     assert build_candidate_rank(mock_pass) > build_candidate_rank(fail)
+
+
+def test_candidate_verdict_forces_fail_when_hard_or_qc_failed() -> None:
+    inconsistent = make_candidate(
+        "inconsistent",
+        verdict="Pass",
+        hard_passed=False,
+        qc_passed=True,
+        avg_mi=95.0,
+        qa_score=99.0,
+        cc_issues=0,
+    )
+
+    assert candidate_verdict(inconsistent) == "Fail"
