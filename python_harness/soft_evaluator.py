@@ -4,6 +4,7 @@ Core module for agentic soft evaluation and code understanding.
 
 import ast
 import contextlib
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -26,6 +27,11 @@ from python_harness.soft_eval_report import (
 )
 
 console = Console()
+_FILE_SUMMARY_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def clear_file_summary_cache() -> None:
+    _FILE_SUMMARY_CACHE.clear()
 
 class FileSummary(BaseModel):
     summary: str
@@ -48,6 +54,7 @@ class SoftEvaluator:
         self.client = None
         self.model_name = settings.model_name
         self.mini_model_name = settings.mini_model_name
+        self.request_timeout_seconds = settings.request_timeout_seconds
 
         client = build_llm_client(settings)
         if client is not None:
@@ -134,14 +141,28 @@ class SoftEvaluator:
             "key_entities": parsed.key_entities,
         }
 
+    def _file_summary_cache_key(self, content: str) -> tuple[str, str]:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return (self.mini_model_name, digest)
+
     def _summarize_file_with_llm(
         self,
         file_path: Path,
         content: str,
         fallback_summary: dict[str, Any],
     ) -> dict[str, Any]:
+        cache_key = self._file_summary_cache_key(content)
+        cached_summary = _FILE_SUMMARY_CACHE.get(cache_key)
+        if cached_summary is not None:
+            return {
+                "file": fallback_summary["file"],
+                "tokens": fallback_summary["tokens"],
+                "summary": cached_summary["summary"],
+                "key_entities": cached_summary["key_entities"],
+            }
         client = cast(Any, self.client)
-        completion = client.chat.completions.create(
+        completion = self._create_completion(
+            client,
             model=self.mini_model_name,
             messages=self._build_file_summary_messages(file_path, content),
             response_format={"type": "json_object"},
@@ -149,7 +170,12 @@ class SoftEvaluator:
         content_str = completion.choices[0].message.content
         if not content_str:
             return fallback_summary
-        return self._parse_file_summary_response(content_str, fallback_summary)
+        summary = self._parse_file_summary_response(content_str, fallback_summary)
+        _FILE_SUMMARY_CACHE[cache_key] = {
+            "summary": summary["summary"],
+            "key_entities": summary["key_entities"],
+        }
+        return summary
 
     def _extract_metrics(
         self,
@@ -171,6 +197,12 @@ class SoftEvaluator:
         hard_results: dict[str, Any],
     ) -> str:
         return build_mock_summary(metrics, hard_results)
+
+    def _create_completion(self, client: Any, **kwargs: Any) -> Any:
+        return client.chat.completions.create(
+            timeout=self.request_timeout_seconds,
+            **kwargs,
+        )
 
     def _build_mock_final_report(
         self,
@@ -320,7 +352,8 @@ class SoftEvaluator:
                     "but comprehensive."
                 )
 
-                completion = self.client.chat.completions.create(
+                completion = self._create_completion(
+                    self.client,
                     model=self.model_name,
                     messages=[
                         {
@@ -373,11 +406,15 @@ class SoftEvaluator:
         qa_results = []
         total_score = 0.0
 
-        for entity in sampled:
+        for index, entity in enumerate(sampled, start=1):
             entity_name = entity["name"]
             entity_type = entity["type"]
             entity_code = entity["code"]
             fan_out = entity.get("fan_out", 0)
+            console.print(
+                f"[dim]Blind QA item {index}/{sample_size} started: "
+                f"{entity_type} {entity_name}[/dim]"
+            )
 
             if not self.client:
                 # Mock evaluation
@@ -405,7 +442,8 @@ class SoftEvaluator:
                         f"Code Snippet:\n```python\n{entity_code}\n```"
                     )
 
-                    completion = self.client.chat.completions.create(
+                    completion = self._create_completion(
+                        self.client,
                         model=self.mini_model_name,
                         messages=[
                             {"role": "system", "content": sys_prompt},
@@ -427,6 +465,10 @@ class SoftEvaluator:
                     feedback = f"Error during Agent evaluation: {e}"
 
             total_score += score
+            console.print(
+                f"[dim]Blind QA item {index}/{sample_size} completed: "
+                f"{entity_type} {entity_name} -> {score:.1f}[/dim]"
+            )
             qa_results.append(
                 {
                     "entity": f"{entity_type} {entity_name} (from {entity['file']})",
@@ -459,7 +501,9 @@ class SoftEvaluator:
 
         try:
             client = cast(Any, self.client)
-            completion = client.chat.completions.create(
+            console.print("[dim]Final report synthesis started[/dim]")
+            completion = self._create_completion(
+                client,
                 model=self.model_name,
                 messages=self._build_final_report_messages(metrics),
                 response_format={"type": "json_object"},
@@ -467,6 +511,7 @@ class SoftEvaluator:
 
             content_str = completion.choices[0].message.content
             if content_str:
+                console.print("[dim]Final report synthesis completed[/dim]")
                 return self._parse_final_report_response(content_str)
             raise ValueError("Empty response from Agent.")
         except Exception as e:

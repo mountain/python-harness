@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Any
 
-from python_harness.evaluator import Evaluator
+from python_harness.hard_evaluator import HardEvaluator
 from python_harness.llm_client import load_llm_settings
+from python_harness.qc_evaluator import QCEvaluator
 from python_harness.refine_apply import LLMSuggestionApplier, NullSuggestionApplier
 from python_harness.refine_execution import execute_candidate
 from python_harness.refine_models import (
@@ -12,10 +13,51 @@ from python_harness.refine_models import (
 )
 from python_harness.refine_scoring import build_candidate_rank, select_best_candidate
 from python_harness.refine_workspace import adopt_candidate_workspace
+from python_harness.soft_evaluator import SoftEvaluator
 
 
-def default_evaluator_runner(path: Path) -> dict[str, Any]:
-    return Evaluator(str(path)).run()
+def _emit(progress_callback: Any, message: str) -> None:
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def default_evaluator_runner(
+    path: Path,
+    progress_callback: Any = None,
+    label: str = "baseline",
+) -> dict[str, Any]:
+    _emit(progress_callback, f"{label} guardrail 1 started")
+    hard_evaluator = HardEvaluator(str(path))
+    hard_results = hard_evaluator.evaluate()
+    if hard_results.get("all_passed", False):
+        _emit(progress_callback, f"{label} guardrail 1 passed")
+    else:
+        _emit(progress_callback, f"{label} guardrail 1 failed")
+
+    _emit(progress_callback, f"{label} guardrail 2 started")
+    qc_evaluator = QCEvaluator(str(path))
+    qc_results = qc_evaluator.evaluate()
+    if qc_results.get("all_passed", False):
+        _emit(progress_callback, f"{label} guardrail 2 passed")
+    else:
+        _emit(progress_callback, f"{label} guardrail 2 failed")
+
+    _emit(progress_callback, f"{label} soft evaluation started")
+    soft_evaluator = SoftEvaluator(str(path))
+    soft_results = soft_evaluator.evaluate()
+    final_report = soft_evaluator.generate_final_report(
+        hard_results,
+        qc_results,
+        soft_results,
+    )
+    _emit(progress_callback, f"{label} soft evaluation passed")
+    return {
+        "hard_evaluation": hard_results,
+        "qc_evaluation": qc_results,
+        "soft_evaluation": soft_results,
+        "final_report": final_report,
+        "overall_status": "success",
+    }
 
 
 def suggestions_from(evaluation: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -52,16 +94,28 @@ def run_refine_round(
     applier: SuggestionApplier,
     self_check_runner: Any,
     max_retries: int,
+    progress_callback: Any = None,
 ) -> RefineRoundResult:
+    def evaluate_baseline(path: Path) -> dict[str, Any]:
+        if evaluator_runner is default_evaluator_runner:
+            return default_evaluator_runner(
+                path,
+                progress_callback=progress_callback,
+                label="baseline",
+            )
+        return dict(evaluator_runner(path))
+
+    _emit(progress_callback, "baseline measure started")
     baseline = Candidate(
         id="baseline",
         parent_id=None,
         depth=0,
         workspace=target_path,
         suggestion_trace=(),
-        evaluation=evaluator_runner(target_path),
+        evaluation=evaluate_baseline(target_path),
         status="measured",
     )
+    _emit(progress_callback, "baseline measure passed")
     round_result = RefineRoundResult(baseline=baseline)
     if (
         isinstance(applier, NullSuggestionApplier)
@@ -83,6 +137,7 @@ def run_refine_round(
             self_check_runner=self_check_runner,
             evaluator_runner=evaluator_runner,
             max_retries=max_retries,
+            progress_callback=progress_callback,
         )
         round_result.candidates.append(candidate)
         first_layer.append(candidate)
@@ -103,6 +158,7 @@ def run_refine_round(
                 self_check_runner=self_check_runner,
                 evaluator_runner=evaluator_runner,
                 max_retries=max_retries,
+                progress_callback=progress_callback,
             )
             round_result.candidates.append(candidate)
 
@@ -122,6 +178,7 @@ def run_refine(
     evaluator_runner: Any | None = None,
     applier: SuggestionApplier | None = None,
     self_check_runner: Any | None = None,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     target_path = target_path.resolve()
     evaluator = evaluator_runner or default_evaluator_runner
@@ -147,6 +204,7 @@ def run_refine(
     stop_reason = "max rounds reached"
 
     while rounds_completed < max_rounds:
+        _emit(progress_callback, f"round {rounds_completed + 1} started")
         round_result = run_refine_round(
             target_path=target_path,
             workspace_root=resolved_workspace_root,
@@ -154,6 +212,7 @@ def run_refine(
             applier=suggestion_applier,
             self_check_runner=self_check,
             max_retries=max_retries,
+            progress_callback=progress_callback,
         )
         rounds_completed += 1
         winner = round_result.winner or round_result.baseline
@@ -165,6 +224,7 @@ def run_refine(
 
         if round_result.stop_reason == "no suggestion applier configured":
             stop_reason = round_result.stop_reason
+            _emit(progress_callback, f"round {rounds_completed} stopped: {stop_reason}")
             break
 
         if winner.workspace != target_path:
@@ -172,12 +232,15 @@ def run_refine(
 
         if not loop:
             stop_reason = "single round completed"
+            _emit(progress_callback, f"round {rounds_completed} stopped: {stop_reason}")
             break
         if not suggestions:
             stop_reason = "winner has no suggestions"
+            _emit(progress_callback, f"round {rounds_completed} stopped: {stop_reason}")
             break
         if winner_rank <= baseline_rank:
             stop_reason = "winner did not improve baseline"
+            _emit(progress_callback, f"round {rounds_completed} stopped: {stop_reason}")
             break
 
     return {

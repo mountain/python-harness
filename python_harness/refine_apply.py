@@ -31,7 +31,8 @@ class LLMSuggestionApplier:
     ) -> None:
         settings = load_llm_settings()
         self.client = client if client is not None else build_llm_client(settings)
-        self.model_name = model_name or settings.model_name
+        self.model_name = model_name or settings.mini_model_name
+        self.request_timeout_seconds = settings.request_timeout_seconds
 
     def _select_files(self, workspace: Path, suggestion: dict[str, str]) -> list[Path]:
         target_file = suggestion.get("target_file", "").strip()
@@ -120,22 +121,32 @@ class LLMSuggestionApplier:
             }
 
         client = cast(Any, self.client)
-        completion = client.chat.completions.create(
-            model=self.model_name,
-            messages=self._build_messages(
-                workspace,
-                suggestion,
-                failure_feedback,
-                files,
-            ),
-            response_format={"type": "json_object"},
-        )
+        try:
+            completion = client.chat.completions.create(
+                model=self.model_name,
+                messages=self._build_messages(
+                    workspace,
+                    suggestion,
+                    failure_feedback,
+                    files,
+                ),
+                response_format={"type": "json_object"},
+                timeout=self.request_timeout_seconds,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "touched_files": [],
+                "failure_reason": str(exc),
+                "retryable": False,
+            }
         content = completion.choices[0].message.content
         if not content:
             return {
                 "ok": False,
                 "touched_files": [],
                 "failure_reason": "LLM returned empty response",
+                "retryable": False,
             }
 
         try:
@@ -153,6 +164,7 @@ class LLMSuggestionApplier:
                 "ok": False,
                 "touched_files": [],
                 "failure_reason": str(exc),
+                "retryable": False,
             }
 
         return {

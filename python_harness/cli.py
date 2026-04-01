@@ -263,6 +263,7 @@ def refine(
         max_retries=max_retries,
         loop=loop,
         max_rounds=max_rounds,
+        progress_callback=lambda message: console.print(f"[dim]{message}[/dim]"),
     )
     console.print(f"[green]winner_id:[/green] {result['winner_id']}")
     console.print(f"[cyan]rounds_completed:[/cyan] {result['rounds_completed']}")

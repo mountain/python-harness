@@ -75,6 +75,42 @@ def test_llm_suggestion_applier_writes_workspace_updates(tmp_path: Path) -> None
     assert target.read_text() == "def value() -> int:\n    return 2\n"
 
 
+def test_llm_suggestion_applier_passes_request_timeout(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("def value() -> int:\n    return 1\n")
+    payload = json.dumps(
+        {
+            "summary": "updated module",
+            "updates": [
+                {
+                    "path": "module.py",
+                    "content": "def value() -> int:\n    return 2\n",
+                }
+            ],
+        }
+    )
+    client = FakeClient(payload)
+    applier = LLMSuggestionApplier(
+        client=client,
+        model_name="test-model",
+    )
+
+    result = applier.apply(
+        workspace,
+        {
+            "title": "Raise value",
+            "description": "Update the function return value",
+            "target_file": "module.py",
+        },
+    )
+
+    assert result["ok"] is True
+    calls = client.chat.completions.calls
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == 60.0
+
+
 def test_llm_suggestion_applier_rejects_updates_outside_workspace(
     tmp_path: Path,
 ) -> None:
@@ -108,3 +144,41 @@ def test_llm_suggestion_applier_rejects_updates_outside_workspace(
 
     assert result["ok"] is False
     assert "outside workspace" in str(result["failure_reason"])
+
+
+def test_llm_suggestion_applier_defaults_to_mini_model(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("def value() -> int:\n    return 1\n")
+    payload = json.dumps(
+        {
+            "summary": "updated module",
+            "updates": [
+                {
+                    "path": "module.py",
+                    "content": "def value() -> int:\n    return 2\n",
+                }
+            ],
+        }
+    )
+    monkeypatch.setenv("LLM_MODEL_NAME", "reasoner-model")
+    monkeypatch.setenv("LLM_MINI_MODEL_NAME", "mini-model")
+    applier = LLMSuggestionApplier(client=FakeClient(payload))
+
+    result = applier.apply(
+        workspace,
+        {
+            "title": "Raise value",
+            "description": "Update the function return value",
+            "target_file": "module.py",
+        },
+    )
+
+    assert result["ok"] is True
+    assert applier.client is not None
+    calls = applier.client.chat.completions.calls
+    assert len(calls) == 1
+    assert calls[0]["model"] == "mini-model"

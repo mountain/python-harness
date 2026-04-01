@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, cast
 
-from python_harness.soft_evaluator import SoftEvaluator
+from python_harness.soft_evaluator import SoftEvaluator, clear_file_summary_cache
 
 
 class _FakeMessage:
@@ -28,8 +28,10 @@ class _FakeCompletions:
     def __init__(self, content: str | None = None, error: Exception | None = None):
         self.content = content
         self.error = error
+        self.calls: list[dict[str, Any]] = []
 
     def create(self, *args: Any, **kwargs: Any) -> _FakeCompletion:
+        self.calls.append(kwargs)
         if self.error:
             raise self.error
         return _FakeCompletion(self.content)
@@ -109,6 +111,100 @@ def test_generate_final_report_mock_fails_on_hard_failure() -> None:
     finally:
         if old_key is not None:
             os.environ["LLM_API_KEY"] = old_key
+
+
+def test_soft_evaluator_llm_calls_use_request_timeout(tmp_path: Path) -> None:
+    evaluator = SoftEvaluator(str(tmp_path))
+    payload = '{"summary":"ok","key_entities":["value"],"complexity_score":1}'
+    fake_client = _FakeClient(payload)
+    evaluator.client = fake_client
+    evaluator._summarize_file_with_llm(
+        tmp_path / "module.py",
+        "def value() -> int:\n    return 1\n",
+        {
+            "file": "module.py",
+            "tokens": 1,
+            "summary": "fallback",
+            "key_entities": [],
+        },
+    )
+
+    calls = fake_client.chat.completions.calls
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == 60.0
+
+
+def test_soft_evaluator_reuses_cached_file_summary(tmp_path: Path) -> None:
+    clear_file_summary_cache()
+    sample = tmp_path / "module.py"
+    sample.write_text("def value() -> int:\n    return 1\n")
+    payload = '{"summary":"ok","key_entities":["value"],"complexity_score":1}'
+    fake_client = _FakeClient(payload)
+
+    evaluator_one = SoftEvaluator(str(tmp_path))
+    evaluator_one.client = fake_client
+    evaluator_one.summarize_file(sample)
+
+    evaluator_two = SoftEvaluator(str(tmp_path))
+    evaluator_two.client = fake_client
+    evaluator_two.summarize_file(sample)
+
+    calls = fake_client.chat.completions.calls
+    assert len(calls) == 1
+
+
+def test_run_sampling_qa_emits_detailed_progress(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    messages: list[str] = []
+    evaluator = SoftEvaluator(str(tmp_path))
+    payload = (
+        '{"explanation":"ok","readability_score":88,'
+        '"feedback":"Readable enough."}'
+    )
+    evaluator.client = _FakeClient(payload)
+    evaluator.extracted_entities = [
+        {
+            "name": "value",
+            "type": "Function",
+            "code": "def value() -> int:\n    return 1\n",
+            "fan_out": 0,
+            "file": "module.py",
+        }
+    ]
+    monkeypatch.setattr("python_harness.soft_evaluator.console.print", messages.append)
+
+    evaluator.run_sampling_qa()
+
+    assert any("Blind QA item 1/1 started" in message for message in messages)
+    assert any("Blind QA item 1/1 completed" in message for message in messages)
+
+
+def test_generate_final_report_emits_progress_messages(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    messages: list[str] = []
+    evaluator = SoftEvaluator(str(tmp_path))
+    evaluator.client = _FakeClient(
+        '{"verdict":"Pass","summary":"ok","suggestions":[]}'
+    )
+    monkeypatch.setattr("python_harness.soft_evaluator.console.print", messages.append)
+
+    report = evaluator.generate_final_report(
+        {
+            "all_passed": True,
+            "radon_cc": {"issues": []},
+            "radon_mi": {"mi_scores": {"core.py": 80.0}},
+        },
+        {"all_passed": True, "failures": []},
+        {"understandability_score": 88.0, "qa_results": {"sampled_entities": []}},
+    )
+
+    assert report["verdict"] == "Pass"
+    assert any("Final report synthesis started" in message for message in messages)
+    assert any("Final report synthesis completed" in message for message in messages)
 
 
 def test_determine_verdict_fails_below_mi_70(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ class LLMSettings:
     base_url: str
     model_name: str
     mini_model_name: str
+    request_timeout_seconds: float
 
 
 def load_llm_settings() -> LLMSettings:
@@ -19,6 +20,9 @@ def load_llm_settings() -> LLMSettings:
         base_url=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
         model_name=os.environ.get("LLM_MODEL_NAME", "deepseek-reasoner"),
         mini_model_name=os.environ.get("LLM_MINI_MODEL_NAME", "deepseek-chat"),
+        request_timeout_seconds=float(
+            os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "60")
+        ),
     )
 
 

@@ -39,6 +39,26 @@ class StaticSuccessApplier:
         return {"ok": True, "touched_files": [], "failure_reason": ""}
 
 
+class NonRetryableFailureApplier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def apply(
+        self,
+        workspace: Path,
+        suggestion: dict[str, str],
+        failure_feedback: str = "",
+    ) -> dict[str, object]:
+        del workspace, suggestion, failure_feedback
+        self.calls += 1
+        return {
+            "ok": False,
+            "touched_files": [],
+            "failure_reason": "Request timed out.",
+            "retryable": False,
+        }
+
+
 def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> None:
     baseline = Candidate(
         id="baseline",
@@ -79,6 +99,37 @@ def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> N
     assert candidate.status == "measured"
     assert applier.calls == ["", "pytest failed"]
     assert candidate.retry_count == 1
+
+
+def test_execute_candidate_does_not_retry_non_retryable_apply_failure(
+    tmp_path: Path,
+) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    applier = NonRetryableFailureApplier()
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="c1",
+        suggestion={"title": "Improve readability", "description": "Split helper"},
+        workspace_root=tmp_path / "runs",
+        applier=applier,
+        self_check_runner=lambda _: (True, ""),
+        evaluator_runner=lambda _: {
+            "final_report": {"verdict": "Fail", "suggestions": []}
+        },
+        max_retries=3,
+    )
+
+    assert candidate.status == "failed"
+    assert candidate.retry_count == 0
+    assert applier.calls == 1
 
 
 def test_execute_candidate_with_default_self_check_does_not_measure_failed_candidate(
@@ -636,6 +687,170 @@ def test_run_refine_accepts_direct_child_workspace_root(tmp_path: Path) -> None:
     )
 
     assert result["stop_reason"] == "single round completed"
+
+
+def test_run_refine_emits_guardrail_stage_logs(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+    messages: list[str] = []
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        if workspace == target:
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {"understandability_score": 70.0},
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {"title": "Winner", "description": "Apply better layout"},
+                    ],
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 95.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    class StaticApplier:
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del failure_feedback
+            (workspace / "sample.py").write_text(f"{suggestion['title']}\n")
+            return {"ok": True, "touched_files": ["sample.py"], "failure_reason": ""}
+
+    run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        evaluator_runner=evaluator,
+        applier=StaticApplier(),
+        self_check_runner=lambda _: (True, ""),
+        progress_callback=messages.append,
+    )
+
+    assert any("baseline measure started" in message for message in messages)
+    assert any("l1-1 apply started" in message for message in messages)
+    assert any("l1-1 guardrail 1 passed" in message for message in messages)
+    assert any("l1-1 guardrail 2 started" in message for message in messages)
+
+
+def test_run_refine_emits_failure_detail_for_guardrail_failure(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+    messages: list[str] = []
+
+    class StaticApplier:
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del workspace, suggestion, failure_feedback
+            return {"ok": True, "touched_files": [], "failure_reason": ""}
+
+    run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        evaluator_runner=lambda _: {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 70.0},
+            "final_report": {
+                "verdict": "Fail",
+                "suggestions": [
+                    {"title": "Winner", "description": "Apply better layout"},
+                ],
+            },
+        },
+        applier=StaticApplier(),
+        self_check_runner=lambda _: (False, "ruff failed"),
+        progress_callback=messages.append,
+    )
+
+    assert any("guardrail 1 failed" in message for message in messages)
+    assert any("ruff failed" in message for message in messages)
+
+
+def test_run_refine_emits_baseline_guardrail_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+    messages: list[str] = []
+
+    class DummyHardEvaluator:
+        def __init__(self, target_path: str) -> None:
+            self.target_path = target_path
+
+        def evaluate(self) -> dict[str, object]:
+            assert self.target_path == str(target)
+            return {"all_passed": True}
+
+    class DummyQCEvaluator:
+        def __init__(self, target_path: str) -> None:
+            self.target_path = target_path
+
+        def evaluate(self) -> dict[str, object]:
+            assert self.target_path == str(target)
+            return {"all_passed": True, "failures": []}
+
+    class DummySoftEvaluator:
+        def __init__(self, target_path: str) -> None:
+            self.target_path = target_path
+
+        def evaluate(self) -> dict[str, object]:
+            assert self.target_path == str(target)
+            return {
+                "understandability_score": 80.0,
+                "qa_results": {"sampled_entities": []},
+            }
+
+        def generate_final_report(
+            self,
+            hard_results: dict[str, object],
+            qc_results: dict[str, object],
+            soft_results: dict[str, object],
+        ) -> dict[str, object]:
+            del hard_results, qc_results, soft_results
+            return {"verdict": "Fail", "suggestions": []}
+
+    monkeypatch.setattr(
+        "python_harness.refine_rounds.HardEvaluator",
+        DummyHardEvaluator,
+    )
+    monkeypatch.setattr("python_harness.refine_rounds.QCEvaluator", DummyQCEvaluator)
+    monkeypatch.setattr(
+        "python_harness.refine_rounds.SoftEvaluator",
+        DummySoftEvaluator,
+    )
+
+    run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        progress_callback=messages.append,
+    )
+
+    assert any("baseline guardrail 1 started" in message for message in messages)
+    assert any("baseline guardrail 1 passed" in message for message in messages)
+    assert any("baseline guardrail 2 started" in message for message in messages)
+    assert any("baseline guardrail 2 passed" in message for message in messages)
 
 
 def test_run_refine_rejects_nested_workspace_root_inside_target(tmp_path: Path) -> None:
