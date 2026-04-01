@@ -27,3 +27,8 @@ def default_self_check_runner(path: Path) -> tuple[bool, str]:
         if not ok:
             return False, output
     return True, ""
+
+
+def default_autofix_runner(path: Path) -> tuple[bool, str]:
+    args = [sys.executable, "-m", "ruff", "check", "--fix", str(path)]
+    return run_command(path, args)

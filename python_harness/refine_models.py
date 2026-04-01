@@ -10,10 +10,12 @@ class Candidate:
     depth: int
     workspace: Path
     suggestion_trace: tuple[str, ...]
+    suggestion: dict[str, str] | None = None
     evaluation: dict[str, Any] | None = None
     status: str = "pending"
     retry_count: int = 0
     selection_reason: str = ""
+    attempt_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

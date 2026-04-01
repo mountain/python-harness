@@ -27,19 +27,21 @@ def build_mock_final_report(
         "summary": build_mock_summary(metrics, hard_results),
         "suggestions": [
             {
-                "title": "Mock Suggestion 1",
-                "description": "Add more docstrings.",
-                "target_file": "all",
+                "title": "Narrow CLI status formatting",
+                "description": (
+                    "Make one small readability fix without changing behavior."
+                ),
+                "target_file": "python_harness/cli.py",
             },
             {
-                "title": "Mock Suggestion 2",
-                "description": "Refactor large functions.",
-                "target_file": "all",
+                "title": "Tighten refine scoring helper typing",
+                "description": "Apply one local typing or naming cleanup.",
+                "target_file": "python_harness/refine_scoring.py",
             },
             {
-                "title": "Mock Suggestion 3",
-                "description": "Improve test coverage.",
-                "target_file": "tests/",
+                "title": "Add one focused retry regression test",
+                "description": "Improve a single refine retry regression scenario.",
+                "target_file": "tests/test_refine_engine.py",
             },
         ],
     }

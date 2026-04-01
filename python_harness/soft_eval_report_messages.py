@@ -14,6 +14,12 @@ def build_final_report_messages(metrics: dict[str, Any]) -> list[dict[str, str]]
         "MUST prioritize fixing those issues.\n"
         "Otherwise, focus on refactoring/quality improvements without "
         "changing external functionality.\n\n"
+        "Each suggestion MUST target exactly one concrete Python file in "
+        "`target_file`; never use `all`, directories, or vague scope.\n"
+        "Prefer local, mechanical, low-risk improvements over broad "
+        "maintainability or architecture slogans.\n"
+        "Avoid suggestions that mainly rewrite comments, docstrings, or "
+        "formatting.\n\n"
         "Output MUST be in valid JSON matching this schema:\n"
         "{\n"
         '  "verdict": "Pass" or "Fail",\n'

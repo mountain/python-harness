@@ -1,9 +1,12 @@
-import json
 from pathlib import Path
 from typing import Any, cast
 
 from python_harness.llm_client import build_llm_client, load_llm_settings
-from python_harness.python_file_inventory import collect_python_files
+from python_harness.refine_apply_support import (
+    build_messages,
+    parse_updates,
+    select_editable_files,
+)
 
 
 class NullSuggestionApplier:
@@ -34,72 +37,6 @@ class LLMSuggestionApplier:
         self.model_name = model_name or settings.mini_model_name
         self.request_timeout_seconds = settings.request_timeout_seconds
 
-    def _select_files(self, workspace: Path, suggestion: dict[str, str]) -> list[Path]:
-        target_file = suggestion.get("target_file", "").strip()
-        if target_file and target_file != "all":
-            target_path = workspace / target_file
-            if target_path.is_file():
-                return [target_path]
-            if target_path.is_dir():
-                return sorted(target_path.rglob("*.py"))[:3]
-        return collect_python_files(workspace)[:3]
-
-    def _build_messages(
-        self,
-        workspace: Path,
-        suggestion: dict[str, str],
-        failure_feedback: str,
-        files: list[Path],
-    ) -> list[dict[str, str]]:
-        inventory = "\n".join(
-            f"- {file_path.relative_to(workspace)}"
-            for file_path in collect_python_files(workspace)
-        )
-        file_blocks = "\n\n".join(
-            (
-                f"FILE: {file_path.relative_to(workspace)}\n"
-                f"```python\n{file_path.read_text(encoding='utf-8')}\n```"
-            )
-            for file_path in files
-        )
-        system_prompt = (
-            "You apply a single repository improvement suggestion. "
-            "Return only valid JSON with schema "
-            '{"updates":[{"path":"relative/path.py","content":"full file content"}]}. '
-            "Make the smallest possible change that satisfies the suggestion "
-            "and preserves behavior. "
-            "Never write files outside the workspace."
-        )
-        user_prompt = (
-            f"Suggestion title: {suggestion.get('title', '')}\n"
-            f"Suggestion description: {suggestion.get('description', '')}\n"
-            f"Suggestion target_file: {suggestion.get('target_file', 'all')}\n"
-            f"Failure feedback from previous attempt: {failure_feedback or 'None'}\n\n"
-            f"Workspace python inventory:\n{inventory}\n\n"
-            f"Editable file contents:\n{file_blocks}"
-        )
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-    def _parse_updates(self, raw_content: str) -> list[dict[str, str]]:
-        payload = json.loads(raw_content)
-        updates = payload.get("updates", [])
-        if not isinstance(updates, list):
-            raise ValueError("LLM updates payload must contain a list")
-        parsed: list[dict[str, str]] = []
-        for update in updates:
-            if not isinstance(update, dict):
-                continue
-            path = update.get("path")
-            content = update.get("content")
-            if isinstance(path, str) and isinstance(content, str):
-                parsed.append({"path": path, "content": content})
-        if not parsed:
-            raise ValueError("LLM returned no file updates")
-        return parsed
-
     def apply(
         self,
         workspace: Path,
@@ -112,7 +49,7 @@ class LLMSuggestionApplier:
                 "touched_files": [],
                 "failure_reason": "LLM_API_KEY not configured",
             }
-        files = self._select_files(workspace, suggestion)
+        files = select_editable_files(workspace, suggestion, failure_feedback)
         if not files:
             return {
                 "ok": False,
@@ -124,7 +61,7 @@ class LLMSuggestionApplier:
         try:
             completion = client.chat.completions.create(
                 model=self.model_name,
-                messages=self._build_messages(
+                messages=build_messages(
                     workspace,
                     suggestion,
                     failure_feedback,
@@ -150,7 +87,7 @@ class LLMSuggestionApplier:
             }
 
         try:
-            updates = self._parse_updates(content)
+            updates = parse_updates(content)
             touched_files: list[str] = []
             for update in updates:
                 destination = (workspace / update["path"]).resolve()

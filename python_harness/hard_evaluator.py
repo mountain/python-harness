@@ -2,18 +2,21 @@
 Core module for integrating hard evaluation tools like ruff, mypy, and pytest.
 """
 
-import json
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from python_harness.hard_eval_helpers import (
+    apply_pytest_coverage_gate,
+    collect_radon_metric_targets,
+    compute_all_passed,
+    run_mypy,
+    run_pytest,
+    run_radon_cc,
+    run_radon_mi,
+    run_ruff,
+    run_ty,
+)
 
-from python_harness.python_file_inventory import collect_python_files
-
-console = Console()
 PYTEST_TIMEOUT_SECONDS = 60
 
 class HardEvaluator:
@@ -25,164 +28,33 @@ class HardEvaluator:
         self.target_path = Path(target_path).resolve()
 
     def _radon_metric_targets(self) -> list[str]:
-        return [str(file_path) for file_path in collect_python_files(self.target_path)]
+        return collect_radon_metric_targets(self.target_path)
 
     def run_ruff(self) -> dict[str, Any]:
         """
         Run Ruff linter and return results.
         """
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "ruff",
-                    "check",
-                    str(self.target_path),
-                    "--output-format",
-                    "json",
-                ],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            issues = json.loads(result.stdout) if result.stdout else []
-            status = "success" if result.returncode == 0 else "failed"
-            return {
-                "status": status,
-                "issues": issues,
-                "return_code": result.returncode,
-                "error_message": result.stderr.strip(),
-            }
-        except Exception as e:
-            return {"status": "error", "error_message": str(e)}
+        return run_ruff(self.target_path)
 
     def run_mypy(self) -> dict[str, Any]:
         """
         Run Mypy type checker and return results.
         """
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "mypy", str(self.target_path)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            status = "success" if result.returncode == 0 else "failed"
-            return {
-                "status": status,
-                "output": result.stdout or result.stderr,
-                "return_code": result.returncode,
-            }
-        except Exception as e:
-            return {"status": "error", "error_message": str(e)}
+        return run_mypy(self.target_path)
 
     def run_ty(self) -> dict[str, Any]:
         """
         Run ty language server checks.
         If ty is not installed, fail gracefully rather than crashing.
         """
-        try:
-            result = subprocess.run(
-                ["ty", "check", str(self.target_path)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            status = "success" if result.returncode == 0 else "failed"
-            # ty might print to stderr
-            output = result.stdout if result.stdout else result.stderr
-            return {
-                "status": status,
-                "output": output,
-                "return_code": result.returncode,
-            }
-        except FileNotFoundError:
-            return {
-                "status": "warning", 
-                "error_message": "ty executable not found. Skipping ty checks."
-            }
-        except Exception as e:
-            # Handle cases where ty is found but fails to run or throws other OS errors
-            if "No such file or directory: 'ty'" in str(e):
-                return {
-                    "status": "warning", 
-                    "error_message": "ty executable not found. Skipping ty checks."
-                }
-            return {"status": "error", "error_message": str(e)}
+        return run_ty(self.target_path)
 
     def run_radon_cc(self) -> dict[str, Any]:
         """
         Run Radon cyclomatic complexity check.
         Flag any function/method with CC > 15 as a failure.
         """
-        try:
-            targets = self._radon_metric_targets()
-            if not targets:
-                return {
-                    "status": "success",
-                    "issues": [],
-                    "return_code": 0,
-                    "output": "",
-                }
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "radon",
-                    "cc",
-                    "-j",
-                    "-a",
-                    *targets,
-                ],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            
-            issues = []
-            status = "success"
-            
-            if result.stdout:
-                data = json.loads(result.stdout)
-                for file_path, blocks in data.items():
-                    if isinstance(blocks, list):
-                        for block in blocks:
-                            if block.get('complexity', 0) > 15:
-                                issues.append({
-                                    "file": file_path,
-                                    "name": block.get('name'),
-                                    "type": block.get('type'),
-                                    "complexity": block.get('complexity')
-                                })
-            
-            if result.returncode != 0:
-                # E.g. syntax error in target code preventing radon from parsing
-                status = "failed"
-            elif issues:
-                status = "failed"
-                
-            return {
-                "status": status,
-                "issues": issues,
-                "return_code": result.returncode,
-                "output": result.stdout,
-                "error_message": result.stderr if result.returncode != 0 else ""
-            }
-        except FileNotFoundError:
-            return {
-                "status": "warning", 
-                "issues": [],
-                "error_message": "radon executable not found. Please install it."
-            }
-        except Exception as e:
-            if "No module named radon" in str(e) or "radon" in str(e):
-                return {
-                    "status": "warning", 
-                    "issues": [],
-                    "error_message": "radon executable not found. Please install it."
-                }
-            return {"status": "error", "error_message": str(e)}
+        return run_radon_cc(self.target_path)
 
     def run_radon_mi(self) -> dict[str, Any]:
         """
@@ -190,87 +62,13 @@ class HardEvaluator:
         This is a diagnostic metric, so it won't fail the build,
         but it contributes to the scorecard.
         """
-        try:
-            targets = self._radon_metric_targets()
-            if not targets:
-                return {"status": "success", "mi_scores": {}, "return_code": 0}
-            result = subprocess.run(
-                [sys.executable, "-m", "radon", "mi", "-j", *targets],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            
-            mi_scores = {}
-            if result.stdout:
-                data = json.loads(result.stdout)
-                for file_path, info in data.items():
-                    mi_scores[file_path] = info.get('mi', 100.0)
-                    
-            return {
-                "status": "success",
-                "mi_scores": mi_scores,
-                "return_code": result.returncode,
-            }
-        except FileNotFoundError:
-            return {
-                "status": "warning",
-                "mi_scores": {},
-                "error_message": "radon executable not found. Please install it."
-            }
-        except Exception as e:
-            if "No module named radon" in str(e) or "radon" in str(e):
-                return {
-                    "status": "warning",
-                    "mi_scores": {},
-                    "error_message": "radon executable not found. Please install it."
-                }
-            return {"status": "error", "error_message": str(e)}
+        return run_radon_mi(self.target_path)
 
     def run_pytest(self) -> dict[str, Any]:
         """
         Run Pytest test suite and return coverage results.
         """
-        try:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                coverage_report = Path(tmp_dir) / "coverage.json"
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pytest",
-                        str(self.target_path),
-                        "--cov",
-                        f"--cov-report=json:{coverage_report}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=PYTEST_TIMEOUT_SECONDS,
-                )
-                coverage_percentage = None
-                if coverage_report.exists():
-                    coverage_data = json.loads(coverage_report.read_text())
-                    coverage_percentage = coverage_data.get("totals", {}).get(
-                        "percent_covered"
-                    )
-            status = "success" if result.returncode == 0 else "failed"
-            return {
-                "status": status,
-                "output": result.stdout,
-                "return_code": result.returncode,
-                "coverage_percentage": coverage_percentage,
-                "error_message": result.stderr.strip(),
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                "status": "failed",
-                "error_message": (
-                    f"Pytest run timed out after {PYTEST_TIMEOUT_SECONDS} seconds."
-                ),
-            }
-        except Exception as e:
-            return {"status": "error", "error_message": str(e)}
+        return run_pytest(self.target_path, timeout_seconds=PYTEST_TIMEOUT_SECONDS)
 
     def evaluate(self) -> dict[str, Any]:
         """
@@ -282,30 +80,14 @@ class HardEvaluator:
         ty_res = self.run_ty()
         radon_cc_res = self.run_radon_cc()
         radon_mi_res = self.run_radon_mi()
-        pytest_res = self.run_pytest()
-        
-        # Parse pytest coverage to check if it's < 90%
-        cov_percentage = pytest_res.get("coverage_percentage")
-        if pytest_res.get("status") == "success":
-            if isinstance(cov_percentage, (int, float)):
-                if cov_percentage < 90.0:
-                    pytest_res["status"] = "failed"
-                    pytest_res["error_message"] = (
-                        f"Test coverage is {cov_percentage:.2f}%, "
-                        f"which is below the 90% threshold."
-                    )
-            else:
-                pytest_res["status"] = "failed"
-                pytest_res["error_message"] = (
-                    "Coverage report was missing or unreadable."
-                )
+        pytest_res = apply_pytest_coverage_gate(self.run_pytest())
 
-        all_passed = (
-            ruff_res.get("status") == "success" and 
-            mypy_res.get("status") == "success" and
-            ty_res.get("status") in ("success", "warning") and
-            radon_cc_res.get("status") in ("success", "warning") and
-            pytest_res.get("status") == "success"
+        all_passed = compute_all_passed(
+            ruff_result=ruff_res,
+            mypy_result=mypy_res,
+            ty_result=ty_res,
+            radon_cc_result=radon_cc_res,
+            pytest_result=pytest_res,
         )
 
         return {
@@ -315,5 +97,5 @@ class HardEvaluator:
             "ty": ty_res,
             "radon_cc": radon_cc_res,
             "radon_mi": radon_mi_res,
-            "pytest": pytest_res
+            "pytest": pytest_res,
         }

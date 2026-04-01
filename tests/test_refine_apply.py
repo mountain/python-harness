@@ -182,3 +182,82 @@ def test_llm_suggestion_applier_defaults_to_mini_model(
     calls = applier.client.chat.completions.calls
     assert len(calls) == 1
     assert calls[0]["model"] == "mini-model"
+
+
+def test_llm_suggestion_applier_includes_failed_file_in_retry_context(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "target.py").write_text("def target() -> int:\n    return 1\n")
+    failed = workspace / "broken.py"
+    failed.write_text("def broken() -> str:\n    return value\n")
+    (workspace / "other.py").write_text("def other() -> int:\n    return 3\n")
+    payload = json.dumps(
+        {
+            "summary": "updated module",
+            "updates": [
+                {
+                    "path": "target.py",
+                    "content": "def target() -> int:\n    return 2\n",
+                }
+            ],
+        }
+    )
+    client = FakeClient(payload)
+    applier = LLMSuggestionApplier(
+        client=client,
+        model_name="test-model",
+    )
+
+    result = applier.apply(
+        workspace,
+        {
+            "title": "Raise value",
+            "description": "Update the function return value",
+            "target_file": "target.py",
+        },
+        failure_feedback='broken.py:1: error: Name "value" is not defined',
+    )
+
+    assert result["ok"] is True
+    user_prompt = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "FILE: target.py" in user_prompt
+    assert "FILE: broken.py" in user_prompt
+    assert "FILE: other.py" not in user_prompt
+
+
+def test_llm_suggestion_applier_prompt_blocks_comment_churn(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "module.py").write_text("def value() -> int:\n    return 1\n")
+    payload = json.dumps(
+        {
+            "summary": "updated module",
+            "updates": [
+                {
+                    "path": "module.py",
+                    "content": "def value() -> int:\n    return 2\n",
+                }
+            ],
+        }
+    )
+    client = FakeClient(payload)
+    applier = LLMSuggestionApplier(
+        client=client,
+        model_name="test-model",
+    )
+
+    result = applier.apply(
+        workspace,
+        {
+            "title": "Raise value",
+            "description": "Update the function return value",
+            "target_file": "module.py",
+        },
+        failure_feedback="module.py:1: error: bad return type",
+    )
+
+    assert result["ok"] is True
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert "Do not rewrite comments, docstrings, or unrelated imports" in system_prompt

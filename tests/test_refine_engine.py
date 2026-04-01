@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from python_harness import refine_checks
 from python_harness.refine_apply import NullSuggestionApplier
 from python_harness.refine_engine import execute_candidate, run_refine, run_refine_round
 from python_harness.refine_models import Candidate
+from python_harness.refine_rounds import suggestions_from
 
 
 class FlakyApplier:
@@ -59,7 +61,7 @@ class NonRetryableFailureApplier:
         }
 
 
-def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> None:
+def test_execute_candidate_passes_after_autofix_without_retry(tmp_path: Path) -> None:
     baseline = Candidate(
         id="baseline",
         parent_id=None,
@@ -88,7 +90,11 @@ def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> N
     candidate = execute_candidate(
         parent=baseline,
         candidate_id="c1",
-        suggestion={"title": "Improve readability", "description": "Split helper"},
+        suggestion={
+            "title": "Improve readability",
+            "description": "Split helper",
+            "target_file": "sample.py",
+        },
         workspace_root=tmp_path / "runs",
         applier=applier,
         self_check_runner=self_check,
@@ -97,8 +103,169 @@ def test_execute_candidate_passes_failure_feedback_on_retry(tmp_path: Path) -> N
     )
 
     assert candidate.status == "measured"
-    assert applier.calls == ["", "pytest failed"]
+    assert applier.calls == [""]
+    assert candidate.retry_count == 0
+
+
+def test_execute_candidate_runs_ruff_fix_before_retrying_llm(tmp_path: Path) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    applier = FlakyApplier()
+    self_check_calls: list[str] = []
+    autofix_calls: list[str] = []
+    measured: list[str] = []
+
+    def self_check(workspace: Path) -> tuple[bool, str]:
+        self_check_calls.append(workspace.name)
+        if len(self_check_calls) == 1:
+            return False, "ruff failed"
+        return True, ""
+
+    def autofix(workspace: Path) -> tuple[bool, str]:
+        autofix_calls.append(workspace.name)
+        return True, "fixed"
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        measured.append(workspace.name)
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 88.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="c1",
+        suggestion={
+            "title": "Improve readability",
+            "description": "Split helper",
+            "target_file": "sample.py",
+        },
+        workspace_root=tmp_path / "runs",
+        applier=applier,
+        self_check_runner=self_check,
+        evaluator_runner=evaluator,
+        max_retries=2,
+        autofix_runner=autofix,
+    )
+
+    assert candidate.status == "measured"
+    assert candidate.retry_count == 0
+    assert applier.calls == [""]
+    assert self_check_calls == ["c1", "c1"]
+    assert autofix_calls == ["c1"]
+    assert measured == ["c1"]
+
+
+def test_execute_candidate_retries_with_post_fix_feedback_when_autofix_does_not_help(
+    tmp_path: Path,
+) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    applier = FlakyApplier()
+    autofix_calls: list[str] = []
+    self_check_attempts = 0
+
+    def self_check(_: Path) -> tuple[bool, str]:
+        nonlocal self_check_attempts
+        self_check_attempts += 1
+        if self_check_attempts == 1:
+            return False, "ruff failed"
+        if self_check_attempts == 2:
+            return False, "mypy failed"
+        return True, ""
+
+    def autofix(workspace: Path) -> tuple[bool, str]:
+        autofix_calls.append(workspace.name)
+        return True, "fixed"
+
+    def evaluator(_: Path) -> dict[str, object]:
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 88.0},
+            "final_report": {"verdict": "Pass", "suggestions": []},
+        }
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="c1",
+        suggestion={
+            "title": "Improve readability",
+            "description": "Split helper",
+            "target_file": "sample.py",
+        },
+        workspace_root=tmp_path / "runs",
+        applier=applier,
+        self_check_runner=self_check,
+        evaluator_runner=evaluator,
+        max_retries=2,
+        autofix_runner=autofix,
+    )
+
+    assert candidate.status == "measured"
     assert candidate.retry_count == 1
+    assert applier.calls[0] == ""
+    assert "Structured guardrail failure summary:" in applier.calls[1]
+    assert "mypy failed" in applier.calls[1]
+    assert autofix_calls == ["c1"]
+
+
+def test_execute_candidate_stops_early_when_guardrail_failure_stagnates(
+    tmp_path: Path,
+) -> None:
+    baseline = Candidate(
+        id="baseline",
+        parent_id=None,
+        depth=0,
+        workspace=tmp_path / "baseline",
+        suggestion_trace=(),
+    )
+    baseline.workspace.mkdir()
+    applier = FlakyApplier()
+
+    def self_check(_: Path) -> tuple[bool, str]:
+        return (
+            False,
+            'python_harness/cli.py:107: error: Returning Any from function '
+            'declared to return "str"',
+        )
+
+    candidate = execute_candidate(
+        parent=baseline,
+        candidate_id="stalled",
+        suggestion={
+            "title": "Improve readability",
+            "description": "Split helper",
+            "target_file": "sample.py",
+        },
+        workspace_root=tmp_path / "runs",
+        applier=applier,
+        self_check_runner=self_check,
+        evaluator_runner=lambda _: {
+            "final_report": {"verdict": "Fail", "suggestions": []}
+        },
+        max_retries=10,
+        autofix_runner=lambda _: (False, "no changes"),
+    )
+
+    assert candidate.status == "failed"
+    assert candidate.retry_count < 10
+    assert "stalled on repeated guardrail failures" in candidate.selection_reason
+    assert len(applier.calls) == 3
 
 
 def test_execute_candidate_does_not_retry_non_retryable_apply_failure(
@@ -117,7 +284,11 @@ def test_execute_candidate_does_not_retry_non_retryable_apply_failure(
     candidate = execute_candidate(
         parent=baseline,
         candidate_id="c1",
-        suggestion={"title": "Improve readability", "description": "Split helper"},
+        suggestion={
+            "title": "Improve readability",
+            "description": "Split helper",
+            "target_file": "sample.py",
+        },
         workspace_root=tmp_path / "runs",
         applier=applier,
         self_check_runner=lambda _: (True, ""),
@@ -167,7 +338,11 @@ def test_execute_candidate_with_default_self_check_does_not_measure_failed_candi
     candidate = execute_candidate(
         parent=baseline,
         candidate_id="blocked",
-        suggestion={"title": "Fix tests", "description": "d"},
+        suggestion={
+            "title": "Fix tests",
+            "description": "d",
+            "target_file": "sample.py",
+        },
         workspace_root=tmp_path / "runs",
         applier=NullSuggestionApplier(),
         self_check_runner=refine_checks.default_self_check_runner,
@@ -182,7 +357,22 @@ def test_execute_candidate_with_default_self_check_does_not_measure_failed_candi
         (
             [sys.executable, "-m", "ruff", "check", str(expected_workspace)],
             expected_workspace,
-        )
+        ),
+        (
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--fix",
+                str(expected_workspace),
+            ],
+            expected_workspace,
+        ),
+        (
+            [sys.executable, "-m", "ruff", "check", str(expected_workspace)],
+            expected_workspace,
+        ),
     ]
 
 
@@ -264,7 +454,11 @@ def test_execute_candidate_retries_when_applier_returns_not_ok(tmp_path: Path) -
     candidate = execute_candidate(
         parent=baseline,
         candidate_id="retry-ok-false",
-        suggestion={"title": "Retry patch", "description": "d"},
+        suggestion={
+            "title": "Retry patch",
+            "description": "d",
+            "target_file": "sample.py",
+        },
         workspace_root=tmp_path / "runs",
         applier=RetryApplier(),
         self_check_runner=lambda _: (True, ""),
@@ -312,7 +506,11 @@ def test_execute_candidate_retries_when_applier_raises(tmp_path: Path) -> None:
     candidate = execute_candidate(
         parent=baseline,
         candidate_id="retry-exception",
-        suggestion={"title": "Retry exception", "description": "d"},
+        suggestion={
+            "title": "Retry exception",
+            "description": "d",
+            "target_file": "sample.py",
+        },
         workspace_root=tmp_path / "runs",
         applier=ExplodingApplier(),
         self_check_runner=lambda _: (True, ""),
@@ -344,9 +542,21 @@ def test_run_refine_round_creates_three_first_layer_and_nine_second_layer(
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": "S1", "description": "d1"},
-                        {"title": "S2", "description": "d2"},
-                        {"title": "S3", "description": "d3"},
+                        {
+                            "title": "S1",
+                            "description": "d1",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": "S2",
+                            "description": "d2",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": "S3",
+                            "description": "d3",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
             }
@@ -358,9 +568,21 @@ def test_run_refine_round_creates_three_first_layer_and_nine_second_layer(
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": f"{name}-A", "description": "x"},
-                        {"title": f"{name}-B", "description": "x"},
-                        {"title": f"{name}-C", "description": "x"},
+                        {
+                            "title": f"{name}-A",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": f"{name}-B",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": f"{name}-C",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
             }
@@ -408,9 +630,9 @@ def test_run_refine_round_stops_early_without_real_suggestion_applier(
             "final_report": {
                 "verdict": "Fail",
                 "suggestions": [
-                    {"title": "S1", "description": "d1"},
-                    {"title": "S2", "description": "d2"},
-                    {"title": "S3", "description": "d3"},
+                    {"title": "S1", "description": "d1", "target_file": "sample.py"},
+                    {"title": "S2", "description": "d2", "target_file": "sample.py"},
+                    {"title": "S3", "description": "d3", "target_file": "sample.py"},
                 ],
             },
         }
@@ -446,10 +668,26 @@ def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> Non
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": "S1", "description": "d1"},
-                        {"title": "S2", "description": "d2"},
-                        {"title": "S3", "description": "d3"},
-                        {"title": "S4", "description": "d4"},
+                        {
+                            "title": "S1",
+                            "description": "d1",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": "S2",
+                            "description": "d2",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": "S3",
+                            "description": "d3",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": "S4",
+                            "description": "d4",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
             }
@@ -461,10 +699,26 @@ def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> Non
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": f"{name}-A", "description": "x"},
-                        {"title": f"{name}-B", "description": "x"},
-                        {"title": f"{name}-C", "description": "x"},
-                        {"title": f"{name}-D", "description": "x"},
+                        {
+                            "title": f"{name}-A",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": f"{name}-B",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": f"{name}-C",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
+                        {
+                            "title": f"{name}-D",
+                            "description": "x",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
             }
@@ -493,6 +747,41 @@ def test_run_refine_round_limits_suggestions_to_top_three(tmp_path: Path) -> Non
 
     assert first_layer_ids == ["l1-1", "l1-2", "l1-3"]
     assert len(second_layer) == 9
+
+
+def test_suggestions_from_requires_specific_target_file() -> None:
+    suggestions = suggestions_from(
+        {
+            "final_report": {
+                "suggestions": [
+                    {"title": "Missing target", "description": "d1"},
+                    {
+                        "title": "All files",
+                        "description": "d2",
+                        "target_file": "all",
+                    },
+                    {
+                        "title": "Dir target",
+                        "description": "d3",
+                        "target_file": "tests/",
+                    },
+                    {
+                        "title": "Specific file",
+                        "description": "d4",
+                        "target_file": "python_harness/refine_scoring.py",
+                    },
+                ]
+            }
+        }
+    )
+
+    assert suggestions == [
+        {
+            "title": "Specific file",
+            "description": "d4",
+            "target_file": "python_harness/refine_scoring.py",
+        }
+    ]
 
 
 def test_run_refine_stops_when_winner_has_no_suggestions(tmp_path: Path) -> None:
@@ -545,9 +834,9 @@ def test_run_refine_stops_early_without_real_suggestion_applier(
             "final_report": {
                 "verdict": "Fail",
                 "suggestions": [
-                    {"title": "S1", "description": "d1"},
-                    {"title": "S2", "description": "d2"},
-                    {"title": "S3", "description": "d3"},
+                    {"title": "S1", "description": "d1", "target_file": "sample.py"},
+                    {"title": "S2", "description": "d2", "target_file": "sample.py"},
+                    {"title": "S3", "description": "d3", "target_file": "sample.py"},
                 ],
             },
         }
@@ -613,7 +902,11 @@ def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": "Winner", "description": "Apply better layout"},
+                        {
+                            "title": "Winner",
+                            "description": "Apply better layout",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
                 "metrics": {
@@ -631,7 +924,11 @@ def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
             "final_report": {
                 "verdict": "Pass",
                 "suggestions": [
-                    {"title": "Keep polishing", "description": "Still possible"},
+                        {
+                            "title": "Keep polishing",
+                            "description": "Still possible",
+                            "target_file": "sample.py",
+                        }
                 ],
             },
             "metrics": {
@@ -710,7 +1007,11 @@ def test_run_refine_emits_guardrail_stage_logs(tmp_path: Path) -> None:
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": "Winner", "description": "Apply better layout"},
+                        {
+                            "title": "Winner",
+                            "description": "Apply better layout",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
             }
@@ -777,7 +1078,11 @@ def test_run_refine_emits_failure_detail_for_guardrail_failure(tmp_path: Path) -
             "final_report": {
                 "verdict": "Fail",
                 "suggestions": [
-                    {"title": "Winner", "description": "Apply better layout"},
+                    {
+                        "title": "Winner",
+                        "description": "Apply better layout",
+                        "target_file": "sample.py",
+                    },
                 ],
             },
         },
@@ -810,7 +1115,11 @@ def test_run_refine_emits_candidate_measure_and_selection_logs(
                 "final_report": {
                     "verdict": "Fail",
                     "suggestions": [
-                        {"title": "Winner", "description": "Apply better layout"},
+                        {
+                            "title": "Winner",
+                            "description": "Apply better layout",
+                            "target_file": "sample.py",
+                        },
                     ],
                 },
                 "metrics": {
@@ -958,6 +1267,87 @@ def test_run_refine_emits_baseline_guardrail_logs(
     assert any("baseline guardrail 1 passed" in message for message in messages)
     assert any("baseline guardrail 2 started" in message for message in messages)
     assert any("baseline guardrail 2 passed" in message for message in messages)
+
+
+def test_run_refine_persists_round_artifact(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("baseline\n")
+    workspace_root = tmp_path / "runs"
+
+    def evaluator(workspace: Path) -> dict[str, object]:
+        if workspace == target:
+            return {
+                "hard_evaluation": {"all_passed": True},
+                "qc_evaluation": {"all_passed": True, "failures": []},
+                "soft_evaluation": {
+                    "understandability_score": 70.0,
+                    "package_summary": {"total_tokens": 11},
+                },
+                "final_report": {
+                    "verdict": "Fail",
+                    "suggestions": [
+                        {
+                            "title": "Winner",
+                            "description": "Apply better layout",
+                            "target_file": "sample.py",
+                        }
+                    ],
+                },
+                "metrics": {
+                    "avg_mi": 60.0,
+                    "qa_score": 70.0,
+                    "cc_issue_count": 1,
+                    "hard_failed": False,
+                    "qc_failed": False,
+                },
+            }
+        return {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {
+                "understandability_score": 95.0,
+                "package_summary": {"total_tokens": 22},
+            },
+            "final_report": {"verdict": "Pass", "suggestions": []},
+            "metrics": {
+                "avg_mi": 90.0,
+                "qa_score": 95.0,
+                "cc_issue_count": 0,
+                "hard_failed": False,
+                "qc_failed": False,
+            },
+        }
+
+    class StaticApplier:
+        def apply(
+            self,
+            workspace: Path,
+            suggestion: dict[str, str],
+            failure_feedback: str = "",
+        ) -> dict[str, object]:
+            del failure_feedback
+            (workspace / "sample.py").write_text(f"{suggestion['title']}\n")
+            return {"ok": True, "touched_files": ["sample.py"], "failure_reason": ""}
+
+    run_refine(
+        target_path=target,
+        workspace_root=workspace_root,
+        max_retries=0,
+        loop=False,
+        max_rounds=1,
+        evaluator_runner=evaluator,
+        applier=StaticApplier(),
+        self_check_runner=lambda _: (True, ""),
+    )
+
+    artifact_path = workspace_root / "artifacts" / "round-001.json"
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["round"] == 1
+    assert artifact["winner_id"] == "l1-1"
+    assert artifact["stop_reason"] == "single round completed"
+    assert artifact["baseline"]["scorecard"].startswith("baseline | status=measured")
+    assert artifact["candidates"][0]["suggestion"]["target_file"] == "sample.py"
 
 
 def test_run_refine_rejects_nested_workspace_root_inside_target(tmp_path: Path) -> None:

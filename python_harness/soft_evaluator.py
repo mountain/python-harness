@@ -2,20 +2,39 @@
 Core module for agentic soft evaluation and code understanding.
 """
 
-import ast
 import contextlib
-import hashlib
-import json
 import random
 from pathlib import Path
 from typing import Any, cast
 
 import tiktoken
-from pydantic import BaseModel
 from rich.console import Console
 
 from python_harness.llm_client import build_llm_client, load_llm_settings
 from python_harness.python_file_inventory import collect_python_files
+from python_harness.soft_eval_defaults import (
+    MOCK_EVALUATION_FEEDBACK,
+    MOCK_EVALUATION_SCORE,
+    QA_SAMPLE_SIZE,
+)
+from python_harness.soft_eval_file_summary import (
+    build_default_file_summary,
+    build_file_summary_cache_key,
+    build_file_summary_messages,
+    build_relative_file_path,
+    cache_file_summary,
+    get_cached_file_summary,
+    parse_file_summary_response,
+    should_call_file_summary_llm,
+)
+from python_harness.soft_eval_file_summary import (
+    clear_file_summary_cache as clear_soft_eval_file_summary_cache,
+)
+from python_harness.soft_eval_package import (
+    build_package_manifest,
+    build_package_synthesis_messages,
+    build_package_understanding,
+)
 from python_harness.soft_eval_report import (
     build_final_report_messages,
     build_mock_final_report,
@@ -25,18 +44,19 @@ from python_harness.soft_eval_report import (
     extract_metrics,
     parse_final_report_response,
 )
+from python_harness.soft_eval_sampling import (
+    build_sampled_entity_result,
+    build_sampling_qa_messages,
+    extract_ast_entities,
+    parse_sampling_qa_response,
+)
 
 console = Console()
-_FILE_SUMMARY_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def clear_file_summary_cache() -> None:
-    _FILE_SUMMARY_CACHE.clear()
+    clear_soft_eval_file_summary_cache()
 
-class FileSummary(BaseModel):
-    summary: str
-    key_entities: list[str]
-    complexity_score: int
 
 class SoftEvaluator:
     """
@@ -84,66 +104,34 @@ class SoftEvaluator:
         return len(self.encoding.encode(content))
 
     def _relative_file_path(self, file_path: Path) -> str:
-        try:
-            return str(file_path.relative_to(self.target_path))
-        except ValueError:
-            return str(file_path)
+        return build_relative_file_path(file_path, self.target_path)
 
     def _build_default_file_summary(
         self,
         file_path: Path,
         tokens: int,
     ) -> dict[str, Any]:
-        return {
-            "file": self._relative_file_path(file_path),
-            "tokens": tokens,
-            "summary": f"File {file_path.name} contains {tokens} tokens.",
-            "key_entities": [],
-        }
+        return build_default_file_summary(file_path, self.target_path, tokens)
 
     def _should_call_file_summary_llm(self, content: str, tokens: int) -> bool:
-        return bool(self.client and content and 0 < tokens < 100000)
+        return should_call_file_summary_llm(self.client, content, tokens)
 
     def _build_file_summary_messages(
         self,
         file_path: Path,
         content: str,
     ) -> list[dict[str, str]]:
-        sys_prompt = (
-            "You are a senior Python architect. Analyze the provided Python "
-            "file and provide a concise summary of its purpose, a list of "
-            "its key entities (classes/functions/globals), and an estimated "
-            "cognitive complexity score (1-10).\n"
-            "Output MUST be in valid JSON matching this schema: "
-            '{"summary": "str", "key_entities": ["str"], "complexity_score": 1}'
-        )
-        return [
-            {"role": "system", "content": sys_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"File name: {file_path.name}\n\nContent:\n"
-                    f"```python\n{content}\n```"
-                ),
-            },
-        ]
+        return build_file_summary_messages(file_path, content)
 
     def _parse_file_summary_response(
         self,
         raw_content: str,
         fallback_summary: dict[str, Any],
     ) -> dict[str, Any]:
-        parsed = FileSummary.model_validate_json(raw_content)
-        return {
-            "file": fallback_summary["file"],
-            "tokens": fallback_summary["tokens"],
-            "summary": parsed.summary,
-            "key_entities": parsed.key_entities,
-        }
+        return parse_file_summary_response(raw_content, fallback_summary)
 
     def _file_summary_cache_key(self, content: str) -> tuple[str, str]:
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return (self.mini_model_name, digest)
+        return build_file_summary_cache_key(self.mini_model_name, content)
 
     def _summarize_file_with_llm(
         self,
@@ -152,14 +140,9 @@ class SoftEvaluator:
         fallback_summary: dict[str, Any],
     ) -> dict[str, Any]:
         cache_key = self._file_summary_cache_key(content)
-        cached_summary = _FILE_SUMMARY_CACHE.get(cache_key)
+        cached_summary = get_cached_file_summary(cache_key, fallback_summary)
         if cached_summary is not None:
-            return {
-                "file": fallback_summary["file"],
-                "tokens": fallback_summary["tokens"],
-                "summary": cached_summary["summary"],
-                "key_entities": cached_summary["key_entities"],
-            }
+            return cached_summary
         client = cast(Any, self.client)
         completion = self._create_completion(
             client,
@@ -171,10 +154,7 @@ class SoftEvaluator:
         if not content_str:
             return fallback_summary
         summary = self._parse_file_summary_response(content_str, fallback_summary)
-        _FILE_SUMMARY_CACHE[cache_key] = {
-            "summary": summary["summary"],
-            "key_entities": summary["key_entities"],
-        }
+        cache_file_summary(cache_key, summary)
         return summary
 
     def _extract_metrics(
@@ -220,6 +200,97 @@ class SoftEvaluator:
     def _parse_final_report_response(self, raw_content: str) -> dict[str, Any]:
         return parse_final_report_response(raw_content)
 
+    def _summarize_package_files(
+        self,
+        files: list[Path],
+    ) -> tuple[list[dict[str, Any]], int]:
+        file_summaries: list[dict[str, Any]] = []
+        total_tokens = 0
+
+        for index, file_path in enumerate(files, start=1):
+            console.print(
+                f"[dim]File summary {index}/{len(files)} started: "
+                f"{file_path.name}[/dim]"
+            )
+            summary_data = self.summarize_file(file_path)
+            file_summaries.append(summary_data)
+            total_tokens += summary_data["tokens"]
+            console.print(
+                f"[dim]File summary {index}/{len(files)} completed: "
+                f"{file_path.name}[/dim]"
+            )
+
+        return file_summaries, total_tokens
+
+    def _synthesize_package_understanding(
+        self,
+        file_summaries: list[dict[str, Any]],
+        total_files: int,
+        total_tokens: int,
+    ) -> str:
+        package_understanding = build_package_understanding(total_files, total_tokens)
+        if not self.client or not file_summaries:
+            return package_understanding
+
+        try:
+            console.print(
+                "[cyan]Agent is synthesizing global package architecture...[/cyan]"
+            )
+            manifest = build_package_manifest(file_summaries)
+            client = cast(Any, self.client)
+            completion = self._create_completion(
+                client,
+                model=self.model_name,
+                messages=build_package_synthesis_messages(manifest),
+            )
+            return completion.choices[0].message.content or package_understanding
+        except Exception as e:
+            console.print(f"[yellow]Agent failed to synthesize package: {e}[/yellow]")
+            return package_understanding
+
+    def _sample_entities_for_qa(self) -> list[dict[str, Any]]:
+        sample_size = min(QA_SAMPLE_SIZE, len(self.extracted_entities))
+        return random.sample(self.extracted_entities, sample_size)
+
+    def _evaluate_sampled_entity(
+        self,
+        entity: dict[str, Any],
+    ) -> tuple[float, str]:
+        entity_code = entity["code"]
+        fan_out = entity.get("fan_out", 0)
+
+        if not self.client:
+            return MOCK_EVALUATION_SCORE, MOCK_EVALUATION_FEEDBACK
+
+        try:
+            client = cast(Any, self.client)
+            completion = self._create_completion(
+                client,
+                model=self.mini_model_name,
+                messages=build_sampling_qa_messages(entity_code, fan_out),
+                response_format={"type": "json_object"},
+            )
+            content_str = completion.choices[0].message.content
+            if not content_str:
+                return 80.0, "Failed to parse Agent response."
+            result = parse_sampling_qa_response(content_str)
+            return result["score"], result["feedback"]
+        except Exception as e:
+            return 0.0, f"Error during Agent evaluation: {e}"
+
+    def _request_final_report(self, metrics: dict[str, Any]) -> dict[str, Any]:
+        client = cast(Any, self.client)
+        completion = self._create_completion(
+            client,
+            model=self.mini_model_name,
+            messages=self._build_final_report_messages(metrics),
+            response_format={"type": "json_object"},
+        )
+        content_str = completion.choices[0].message.content
+        if content_str:
+            return self._parse_final_report_response(content_str)
+        raise ValueError("Empty response from Agent.")
+
     def calculate_token_complexity(self, file_path: Path) -> int:
         """
         Calculate the token count for a given file as a proxy
@@ -244,45 +315,7 @@ class SoftEvaluator:
         1. Classes and functions for later QA sampling.
         2. Fan-out (number of imported external modules) to measure coupling.
         """
-        try:
-            tree = ast.parse(content)
-            
-            # Calculate Fan-out (number of unique imported top-level modules)
-            imported_modules = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imported_modules.add(alias.name.split('.')[0])
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    imported_modules.add(node.module.split('.')[0])
-            
-            fan_out = len(imported_modules)
-            
-            # Extract classes and functions
-            for node in ast.walk(tree):
-                if isinstance(
-                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                ):
-                    try:
-                        source_segment = ast.get_source_segment(content, node)
-                        if source_segment:
-                            if isinstance(node, ast.ClassDef):
-                                entity_type = "Class"
-                            else:
-                                entity_type = "Function"
-                            self.extracted_entities.append(
-                                {
-                                    "file": file_path.name,
-                                    "type": entity_type,
-                                    "name": node.name,
-                                    "code": source_segment,
-                                    "fan_out": fan_out,  # Context
-                                }
-                            )
-                    except Exception:
-                        pass
-        except SyntaxError:
-            pass  # Skip files with syntax errors
+        self.extracted_entities.extend(extract_ast_entities(file_path, content))
 
     def summarize_file(self, file_path: Path) -> dict[str, Any]:
         """
@@ -313,75 +346,17 @@ class SoftEvaluator:
         Aggregate file summaries into a package-level understanding.
         """
         files = self._get_python_files()
-        file_summaries = []
-        total_tokens = 0
 
         console.print(
             f"[cyan]Agent is analyzing {len(files)} Python files "
             f"for cognitive load and architecture...[/cyan]"
         )
-
-        for index, file in enumerate(files, start=1):
-            console.print(
-                f"[dim]File summary {index}/{len(files)} started: "
-                f"{file.name}[/dim]"
-            )
-            summary_data = self.summarize_file(file)
-            file_summaries.append(summary_data)
-            total_tokens += summary_data["tokens"]
-            console.print(
-                f"[dim]File summary {index}/{len(files)} completed: "
-                f"{file.name}[/dim]"
-            )
-
-        # Synthesize package architecture
-        package_understanding = (
-            f"The package contains {len(files)} files with a total cognitive load "
-            f"of {total_tokens} tokens."
+        file_summaries, total_tokens = self._summarize_package_files(files)
+        package_understanding = self._synthesize_package_understanding(
+            file_summaries=file_summaries,
+            total_files=len(files),
+            total_tokens=total_tokens,
         )
-        
-        if self.client and file_summaries:
-            try:
-                console.print(
-                    "[cyan]Agent is synthesizing global package architecture...[/cyan]"
-                )
-                manifest_lines = [
-                    f"- {s['file']}: {s['summary']} "
-                    f"(Entities: {', '.join(s['key_entities'])})"
-                    for s in file_summaries
-                ]
-                manifest = "\n".join(manifest_lines)
-
-                sys_prompt = (
-                    "You are a senior software architect. Based on the following "
-                    "summaries of individual files in a Python package, write a "
-                    "coherent, high-level explanation of how this entire package "
-                    "works and what its primary responsibilities are. Be concise "
-                    "but comprehensive."
-                )
-
-                completion = self._create_completion(
-                    self.client,
-                    model=self.model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": sys_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Package files and summaries:\n{manifest}",
-                        },
-                    ],
-                )
-
-                package_understanding = (
-                    completion.choices[0].message.content or package_understanding
-                )
-            except Exception as e:
-                console.print(
-                    f"[yellow]Agent failed to synthesize package: {e}[/yellow]"
-                )
 
         return {
             "total_files": len(files),
@@ -402,9 +377,8 @@ class SoftEvaluator:
                 "note": "No entities found for sampling.",
             }
 
-        # Randomly sample up to 3 entities
-        sample_size = min(3, len(self.extracted_entities))
-        sampled = random.sample(self.extracted_entities, sample_size)
+        sampled = self._sample_entities_for_qa()
+        sample_size = len(sampled)
 
         console.print(
             f"\n[cyan]Agent is running Blind QA on {sample_size} "
@@ -417,73 +391,17 @@ class SoftEvaluator:
         for index, entity in enumerate(sampled, start=1):
             entity_name = entity["name"]
             entity_type = entity["type"]
-            entity_code = entity["code"]
-            fan_out = entity.get("fan_out", 0)
             console.print(
                 f"[dim]Blind QA item {index}/{sample_size} started: "
                 f"{entity_type} {entity_name}[/dim]"
             )
-
-            if not self.client:
-                # Mock evaluation
-                score = 100.0
-                feedback = "Mock evaluation: Code is perfectly readable."
-            else:
-                try:
-                    sys_prompt = (
-                        "You are an expert Code Reviewer and Software Architect. "
-                        "You will be given a snippet of Python code (a class or "
-                        "function) along with its module's Fan-out metric (number "
-                        "of external dependencies). Your task is to evaluate its "
-                        "readability and structural cohesion.\n"
-                        "Output MUST be in valid JSON matching this schema: "
-                        '{"explanation": "str", "readability_score": 1, '
-                        '"feedback": "str"}\n'
-                        "- `explanation`: Briefly explain what this code does.\n"
-                        "- `readability_score`: A score from 0 to 100.\n"
-                        "- `feedback`: What makes it easy/hard to understand? "
-                        "Does a high Fan-out indicate bad cohesion here?"
-                    )
-
-                    user_content = (
-                        f"Module Fan-out (Dependencies): {fan_out}\n\n"
-                        f"Code Snippet:\n```python\n{entity_code}\n```"
-                    )
-
-                    completion = self._create_completion(
-                        self.client,
-                        model=self.mini_model_name,
-                        messages=[
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        response_format={"type": "json_object"},
-                    )
-
-                    content_str = completion.choices[0].message.content
-                    if content_str:
-                        result = json.loads(content_str)
-                        score = float(result.get("readability_score", 100))
-                        feedback = result.get("feedback", "")
-                    else:
-                        score = 80.0
-                        feedback = "Failed to parse Agent response."
-                except Exception as e:
-                    score = 0.0
-                    feedback = f"Error during Agent evaluation: {e}"
-
+            score, feedback = self._evaluate_sampled_entity(entity)
             total_score += score
             console.print(
                 f"[dim]Blind QA item {index}/{sample_size} completed: "
                 f"{entity_type} {entity_name} -> {score:.1f}[/dim]"
             )
-            qa_results.append(
-                {
-                    "entity": f"{entity_type} {entity_name} (from {entity['file']})",
-                    "score": score,
-                    "feedback": feedback,
-                }
-            )
+            qa_results.append(build_sampled_entity_result(entity, score, feedback))
 
         final_average_score = total_score / sample_size if sample_size > 0 else 100.0
 
@@ -497,10 +415,10 @@ class SoftEvaluator:
         self,
         hard_results: dict[str, Any],
         qc_results: dict[str, Any],
-        soft_results: dict[str, Any]
+        soft_results: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Synthesize all evaluation results into a final verdict and exactly 
+        Synthesize all evaluation results into a final verdict and exactly
         3 actionable suggestions.
         """
         metrics = self._extract_metrics(hard_results, qc_results, soft_results)
@@ -508,26 +426,16 @@ class SoftEvaluator:
             return self._build_mock_final_report(hard_results, metrics)
 
         try:
-            client = cast(Any, self.client)
             console.print("[dim]Final report synthesis started[/dim]")
-            completion = self._create_completion(
-                client,
-                model=self.mini_model_name,
-                messages=self._build_final_report_messages(metrics),
-                response_format={"type": "json_object"},
-            )
-
-            content_str = completion.choices[0].message.content
-            if content_str:
-                console.print("[dim]Final report synthesis completed[/dim]")
-                return self._parse_final_report_response(content_str)
-            raise ValueError("Empty response from Agent.")
+            report = self._request_final_report(metrics)
+            console.print("[dim]Final report synthesis completed[/dim]")
+            return report
         except Exception as e:
             console.print(f"[yellow]Failed to generate final report: {e}[/yellow]")
             return {
                 "verdict": "Error",
                 "summary": f"Failed to synthesize report: {e}",
-                "suggestions": []
+                "suggestions": [],
             }
     def evaluate(self) -> dict[str, Any]:
         """

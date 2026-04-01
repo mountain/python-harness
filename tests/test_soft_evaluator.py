@@ -226,6 +226,32 @@ def test_summarize_package_emits_file_level_progress(
     assert any("File summary 1/1 completed" in message for message in messages)
 
 
+def test_summarize_package_files_helper_collects_summaries_and_tokens(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "a.py"
+    second = tmp_path / "b.py"
+    first.write_text("def a():\n    return 1\n", encoding="utf-8")
+    second.write_text("def b():\n    return 2\n", encoding="utf-8")
+    evaluator = SoftEvaluator(str(tmp_path))
+    monkeypatch.setattr(
+        SoftEvaluator,
+        "summarize_file",
+        lambda self, file_path: {
+            "file": file_path.name,
+            "tokens": 3 if file_path.name == "a.py" else 5,
+            "summary": f"summary for {file_path.name}",
+            "key_entities": [],
+        },
+    )
+
+    file_summaries, total_tokens = evaluator._summarize_package_files([first, second])
+
+    assert [summary["file"] for summary in file_summaries] == ["a.py", "b.py"]
+    assert total_tokens == 8
+
+
 def test_determine_verdict_fails_below_mi_70(tmp_path: Path) -> None:
     """
     Test that MI below 70 no longer qualifies for a passing verdict.
@@ -456,6 +482,49 @@ def test_run_sampling_qa_client_success(monkeypatch: Any, tmp_path: Path) -> Non
 
     assert result["qa_score"] == 88.0
     assert result["sampled_entities"][0]["feedback"] == "clear"
+
+
+def test_evaluate_sampled_entity_helper_uses_mock_when_client_missing(
+    tmp_path: Path,
+) -> None:
+    evaluator = SoftEvaluator(str(tmp_path))
+    evaluator.client = None
+
+    score, feedback = evaluator._evaluate_sampled_entity(
+        {
+            "file": "a.py",
+            "type": "Function",
+            "name": "foo",
+            "code": "def foo():\n    pass",
+            "fan_out": 1,
+        }
+    )
+
+    assert score == 100.0
+    assert feedback == "Mock evaluation: Code is perfectly readable."
+
+
+def test_request_final_report_helper_parses_client_response(tmp_path: Path) -> None:
+    evaluator = SoftEvaluator(str(tmp_path))
+    evaluator.client = cast(
+        Any,
+        _FakeClient('{"verdict":"Pass","summary":"Healthy","suggestions":[]}'),
+    )
+
+    report = evaluator._request_final_report(
+        {
+            "avg_mi": 80.0,
+            "cc_issues": [],
+            "qa_score": 90.0,
+            "hard_errors": [],
+            "qc_errors": [],
+            "qa_entities": [],
+            "hard_failed": False,
+            "qc_failed": False,
+        }
+    )
+
+    assert report == {"verdict": "Pass", "summary": "Healthy", "suggestions": []}
 
 
 def test_generate_final_report_real_path_success(tmp_path: Path) -> None:
