@@ -5,16 +5,15 @@ Core module for agentic soft evaluation and code understanding.
 import ast
 import contextlib
 import json
-import os
 import random
 from pathlib import Path
 from typing import Any, cast
 
 import tiktoken
-from openai import OpenAI
 from pydantic import BaseModel
 from rich.console import Console
 
+from python_harness.llm_client import build_llm_client, load_llm_settings
 from python_harness.python_file_inventory import collect_python_files
 from python_harness.soft_eval_report import (
     build_final_report_messages,
@@ -45,21 +44,20 @@ class SoftEvaluator:
         with contextlib.suppress(Exception):
             self.encoding = tiktoken.get_encoding("cl100k_base")
 
-        # Initialize OpenAI client only if API key is present
+        settings = load_llm_settings()
         self.client = None
-        api_key = os.environ.get("LLM_API_KEY")
-        base_url = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1")
-        self.model_name = os.environ.get("LLM_MODEL_NAME", "deepseek-reasoner")
-        self.mini_model_name = os.environ.get("LLM_MINI_MODEL_NAME", "deepseek-chat")
+        self.model_name = settings.model_name
+        self.mini_model_name = settings.mini_model_name
 
-        if api_key:
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
+        client = build_llm_client(settings)
+        if client is not None:
+            self.client = client
         else:
             console.print(
                 "[yellow]Warning: LLM_API_KEY not set. "
                 "Agent will run in mock mode.[/yellow]"
             )
-            
+
         # Store extracted AST entities for sampling
         self.extracted_entities: list[dict[str, Any]] = []
 

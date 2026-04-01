@@ -2,7 +2,8 @@ from pathlib import Path
 from typing import Any
 
 from python_harness.evaluator import Evaluator
-from python_harness.refine_apply import NullSuggestionApplier
+from python_harness.llm_client import load_llm_settings
+from python_harness.refine_apply import LLMSuggestionApplier, NullSuggestionApplier
 from python_harness.refine_execution import execute_candidate
 from python_harness.refine_models import (
     Candidate,
@@ -124,7 +125,12 @@ def run_refine(
 ) -> dict[str, Any]:
     target_path = target_path.resolve()
     evaluator = evaluator_runner or default_evaluator_runner
-    suggestion_applier = applier or NullSuggestionApplier()
+    suggestion_applier = applier
+    if suggestion_applier is None:
+        settings = load_llm_settings()
+        suggestion_applier = (
+            LLMSuggestionApplier() if settings.api_key else NullSuggestionApplier()
+        )
     self_check = self_check_runner
     if self_check is None:
         from python_harness.refine_checks import default_self_check_runner

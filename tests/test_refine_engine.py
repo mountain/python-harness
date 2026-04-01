@@ -478,11 +478,13 @@ def test_run_refine_stops_when_winner_has_no_suggestions(tmp_path: Path) -> None
 
 
 def test_run_refine_stops_early_without_real_suggestion_applier(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
     (target / "sample.py").write_text("print('baseline')\n")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
 
     def evaluator(_: Path) -> dict[str, object]:
         return {
@@ -510,6 +512,35 @@ def test_run_refine_stops_early_without_real_suggestion_applier(
     assert result["rounds_completed"] == 1
     assert result["winner_id"] == "baseline"
     assert result["stop_reason"] == "no suggestion applier configured"
+
+
+def test_run_refine_uses_real_llm_applier_when_api_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "sample.py").write_text("print('baseline')\n")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "python_harness.refine_rounds.LLMSuggestionApplier",
+        lambda: StaticSuccessApplier(),
+    )
+
+    result = run_refine(
+        target_path=target,
+        max_retries=0,
+        loop=True,
+        max_rounds=3,
+        evaluator_runner=lambda _: {
+            "hard_evaluation": {"all_passed": True},
+            "qc_evaluation": {"all_passed": True, "failures": []},
+            "soft_evaluation": {"understandability_score": 80.0},
+            "final_report": {"verdict": "Fail", "suggestions": []},
+        },
+    )
+
+    assert result["stop_reason"] != "no suggestion applier configured"
 
 
 def test_run_refine_adopts_winner_workspace_and_stops_without_improvement(
